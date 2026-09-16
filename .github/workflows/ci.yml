@@ -10,12 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: ['18', '20']
+        # node:sqlite (DatabaseSync) is available unflagged from v22.13 (LTS) / v24; the server
+        # has no native deps to compile, so npm ci is pure-JS (express + zod).
+        node: ['22', '24']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # npm ci pulls a prebuilt better-sqlite3 binary for the runner's Node ABI.
       - run: npm ci
       - run: npm test
