@@ -9,17 +9,16 @@
   "scripts": {
     "bus": "node cc-bus.mjs start",
     "status": "node cc-bus.mjs status",
-    "server": "node server/server.mjs",
+    "server": "node --disable-warning=ExperimentalWarning server/server.mjs",
     "console": "node cc-console.mjs",
     "test": "node test/paths.test.mjs && node test/render.test.mjs && node test/db.test.mjs && node test/rest.test.mjs && node test/server.test.mjs && node test/ws.test.mjs && node test/discovery.test.mjs && node test/supervisor.test.mjs && node test/console.test.mjs && node test/console-render.test.mjs && node test/version-gate.test.mjs"
   },
   "dependencies": {
-    "better-sqlite3": "^12.2.0",
     "express": "^5.1.0",
     "zod": "^3.24.1"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "license": "MIT"
 }

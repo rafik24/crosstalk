@@ -53,14 +53,14 @@ claude plugin marketplace add https://github.com/rafik24/crosstalk.git
 claude plugin install crosstalk@crosstalk
 ```
 
-Then create the config `~/.claude/.crosstalk` (shared token) and, on a node that will **host**,
-build the native server dep once (`cd <plugin-dir> && npm install` — the plugin's auto-install runs
-`--ignore-scripts`, which skips `better-sqlite3`). Full step-by-step: **[`ENROLLMENT.md`](./ENROLLMENT.md)**.
+Then create the config `~/.claude/.crosstalk` (shared token). That's it — **hosting needs no native
+build**: the server stores everything in Node's built-in `node:sqlite`, so a bare `claude plugin
+install` can host the bus on any node (Node 22.13+/24). Full step-by-step: **[`ENROLLMENT.md`](./ENROLLMENT.md)**.
 
 ## Quick start (running the bus directly)
 
 ```sh
-npm ci                       # installs express + better-sqlite3 (v12; node 18+/24 OK)
+npm ci                       # installs express + zod (pure JS; node 22.13+/24, server uses built-in node:sqlite)
 node cc-bus.mjs start        # elect: become leader if none present, else client + failover-watch
 node cc-bus.mjs ensure       # idempotent: start a supervisor here only if one isn't already running
 node cc-bus.mjs status       # the authoritative leader + estate failover coverage

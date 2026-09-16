@@ -139,7 +139,10 @@ const log = (...a) => console.log(`[cc-bus ${HOST}]`, ...a);
 
 // --- spawn the vendored server as leader at a given epoch ---
 function spawnLeader(epoch, port, token) {
-  const child = spawn(process.execPath, [SERVER_ENTRY], {
+  // `--disable-warning=ExperimentalWarning` silences the one-time "SQLite is an experimental
+  // feature" line that node:sqlite (server/db.mjs) prints on load, so it never spams the bus
+  // logs — while leaving every other warning intact. Only THIS type is disabled.
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', SERVER_ENTRY], {
     env: {
       ...process.env,
       PORT: String(port),

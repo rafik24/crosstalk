@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';   // reopen a snapshot to prove it round-trips
 
 // Force SQLite BEFORE importing db.mjs — createDB() reads these at open time.
 delete process.env.DATABASE_URL;
@@ -282,10 +283,31 @@ try {
   // Recent rows survive a 7-day cleanup.
   ok((await db.getMessage(m2)) !== undefined, 'cleanup keeps fresh messages');
 
-  // snapshot (SQLite backup)
+  // snapshot — the `VACUUM INTO` path (export + replication + migrate). This is the riskiest
+  // line in the node:sqlite port, so don't just check the file is non-empty: REOPEN it as a real
+  // SQLite DB and assert every table round-trips against the live counts. Also snapshot twice to
+  // the SAME path — VACUUM INTO refuses an existing file, so this exercises the rm-then-vacuum
+  // overwrite (a broken safeDest escape or a missing rm would turn one of these red).
   const snapPath = path.join(dataDir, 'snap.db');
   await db.snapshot(snapPath);
+  await db.snapshot(snapPath); // second write to the same dest must not throw
   ok(fs.existsSync(snapPath) && fs.statSync(snapPath).size > 0, 'snapshot writes a backup file');
+  const liveCount = (t) => db.db.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c;
+  // Guard the teeth: the round-trip check only bites while the source has rows, so assert the
+  // live DB is non-empty here (a future reorder that empties it would otherwise make the loop pass
+  // vacuously against an empty snapshot).
+  ok(liveCount('messages') > 0 && liveCount('channels') > 0, 'live DB is non-empty before snapshot');
+  const snap = new DatabaseSync(snapPath);
+  try {
+    for (const t of ['messages', 'channels', 'instances', 'shared_data', 'work_items', 'read_cursors']) {
+      ok(
+        snap.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c === liveCount(t),
+        `snapshot round-trips ${t} (count matches live DB, non-vacuous)`,
+      );
+    }
+  } finally {
+    snap.close();
+  }
 
   console.log(`\n  db.test.mjs: ${passed} checks passed ✓\n`);
 } catch (err) {

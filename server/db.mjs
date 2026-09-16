@@ -1,10 +1,13 @@
 // db.mjs — Crosstalk storage layer. SQLite-only.
 //
-// One db object backed by SQLite via better-sqlite3, file at
+// One db object backed by SQLite via Node's built-in `node:sqlite` (DatabaseSync), file at
 // ${CC_DATA_DIR||~/.crosstalk}/messages.db (migrated once from the old ~/.cross-claude-mcp).
+// Using the built-in driver — instead of the native `better-sqlite3` addon — means the server
+// has ZERO native dependencies, so it runs from a bare `claude plugin install` on any node
+// (no compile step, survives every plugin update). See rafik24/crosstalk#18.
 //
 // The backend is hidden behind a small "adapter" whose query methods are ALWAYS async.
-// The underlying better-sqlite3 calls are synchronous, so we just wrap their results in
+// The underlying node:sqlite calls are synchronous, so we just wrap their results in
 // resolved promises; every db method below awaits the adapter, so callers already `await`
 // everything and the async surface stays stable.
 //
@@ -12,7 +15,12 @@
 // never interpolated into the SQL text. The only things interpolated are internal, trusted
 // SQL fragments (SQL keywords, column names, and fixed retention amounts).
 
-import Database from 'better-sqlite3';
+// node:sqlite is still marked experimental and prints a one-time ExperimentalWarning on load.
+// That warning is emitted through an internal path that a `process.emitWarning` override does
+// NOT intercept, so it is silenced at the process level instead: the bus server child is
+// spawned with `--disable-warning=ExperimentalWarning` (cc-bus.mjs spawnLeader) and the `server`
+// npm script carries the same flag — keeping every OTHER warning intact.
+import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 import { dataDir as resolveDataDir } from '../cc-paths.mjs';
@@ -61,7 +69,8 @@ export function normalizeChannelName(name) {
 //   exec(sql)                       run DDL (possibly multiple statements)
 //   snapshot(dest) / close()
 
-// Convert `undefined` binds to `null` — better-sqlite3 rejects undefined outright.
+// Convert `undefined` binds to `null` — node:sqlite (like better-sqlite3 before it) rejects
+// an undefined bind outright ("Provided value cannot be bound to SQLite parameter").
 const cleanParams = (params) => (params ?? []).map((p) => (p === undefined ? null : p));
 
 function makeSqliteAdapter(handle) {
@@ -92,8 +101,21 @@ function makeSqliteAdapter(handle) {
       handle.exec(sql);
     },
     async snapshot(dest) {
-      // better-sqlite3's online backup — safe to call while the WAL is live.
-      await handle.backup(dest);
+      // node:sqlite has no online .backup(); `VACUUM INTO` writes a single consistent,
+      // WAL-safe copy of the live DB to `dest` — the equivalent for our export/replication path.
+      // It REFUSES to write if the target already exists, so clear any stale file first
+      // (mirrors better-sqlite3's overwrite semantics). `dest` is an internal, server-generated
+      // temp path; double any single-quote defensively before it enters the SQL string literal.
+      //
+      // TRADE-OFF: unlike better-sqlite3's incremental .backup() (which yielded between page
+      // batches), VACUUM INTO is one synchronous call that blocks the event loop for the whole
+      // copy, so /cc/export and each replication tick briefly freeze request handling on the
+      // leader — a cost that scales with DB size. Immaterial at the bus's scale (a few thousand
+      // messages ⇒ single-digit ms); if the store ever grows large, revisit (e.g. checkpoint +
+      // off-thread file copy, or a worker thread) rather than freezing the leader per tick.
+      fs.rmSync(dest, { force: true });
+      const safeDest = String(dest).replace(/'/g, "''");
+      handle.exec(`VACUUM INTO '${safeDest}'`);
     },
     async close() {
       handle.close();
@@ -185,12 +207,13 @@ function schemaStatements() {
 export async function createDB() {
   const dataDir = resolveDataDir();   // ~/.crosstalk (CC_DATA_DIR overrides); migrates old dir once
   fs.mkdirSync(dataDir, { recursive: true });
-  const handle = new Database(path.join(dataDir, 'messages.db'));
-  handle.pragma('journal_mode = WAL');
-  handle.pragma('foreign_keys = ON');
+  const handle = new DatabaseSync(path.join(dataDir, 'messages.db'));
+  // node:sqlite has no .pragma() helper — run pragmas as ordinary statements.
+  handle.exec('PRAGMA journal_mode = WAL');
+  handle.exec('PRAGMA foreign_keys = ON');
   const a = makeSqliteAdapter(handle);
 
-  // Create schema (idempotent). better-sqlite3 accepts a batch of ';'-separated statements.
+  // Create schema (idempotent). DatabaseSync.exec accepts a batch of ';'-separated statements.
   await a.exec(schemaStatements().join(';\n'));
 
   const now = a.now;

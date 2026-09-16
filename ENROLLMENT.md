@@ -30,14 +30,15 @@ the config below, so they only fire on enrolled machines. (Dev/local instead:
 > credentials for `rafik24/crosstalk` (or the repo must be published). A creds-less fleet
 > box will fail at the clone — provision creds, copy the tree over, or publish.
 
-Then two machine-specific steps the plugin can't do for you:
+Then one machine-specific step the plugin can't do for you:
 
 1. **Create the config** `~/.claude/.crosstalk` (the shared token; git-ignored). See §3 below for
    the fields — creating this file **is** the per-machine opt-in.
-2. **(host-only) build the native server dep.** The plugin auto-install uses `--ignore-scripts`,
-   which does **not** build `better-sqlite3`. A node that may *host* the bus must, once, run a full
-   install in the plugin dir: `cd <plugin-dir> && npm install`. A connect-only node skips this — the
-   client scripts use only Node built-ins.
+
+There is **no host-only build step** any more: the server stores its state in Node's built-in
+`node:sqlite`, so it has zero native dependencies. A bare plugin install can host the bus on any
+node — no compile, and it survives every `claude plugin update`. (Both host and client need Node
+22.13+/24, where `node:sqlite` is available unflagged.)
 
 The skill is then `Skill(crosstalk:crosstalk)`. The detailed manual steps below are what the plugin
 automates — use them only for a hand-wired / non-plugin setup.
@@ -48,14 +49,14 @@ automates — use them only for a hand-wired / non-plugin setup.
 
 | Need | Why | Check |
 |---|---|---|
-| **Node.js 18+** (24 fine) | runs every `cc-*.mjs` script | `node -v` |
+| **Node.js 22.13+** (24 fine) | runs every `cc-*.mjs` script; the server needs the built-in `node:sqlite` | `node -v` |
 | **bash** | the SessionStart hook is a bash script (Windows: **git-bash**, ships with Git for Windows) | `bash --version` |
 | **A path to the leader** — either same **LAN** as a host, or **Tailscale up + logged in** | how discovery reaches the leader | `tailscale status` (if using tailnet) |
 | **The bus token** | shared secret `CC_TOKEN` | copy from an already-enrolled machine's `~/.claude/.cross-claude-bus`, or your secrets store |
 
-To **host** the bus (not just connect), also run `npm ci` (pulls `better-sqlite3`) and open
-inbound **TCP 8787** + **UDP 8788**. A connect-only node needs neither — the client scripts
-use only Node built-ins.
+To **host** the bus (not just connect), open inbound **TCP 8787** + **UDP 8788**. There is no
+native dep to build — the server uses the built-in `node:sqlite`. A connect-only node needs neither
+the ports nor a server — the client scripts use only Node built-ins.
 
 ---
 
@@ -231,8 +232,9 @@ open <REPO>/cc-console.html                         # human web console (PO dash
 
 A node that **hosts** should run `cc-bus start` under a supervisor:
 
-- **Linux:** a systemd **user** unit, `Restart=always`. Ensure the unit's `node` matches the
-  ABI `better-sqlite3` was built under (pin the fnm/nvm node path, not a distro `/usr/bin/node`).
+- **Linux:** a systemd **user** unit, `Restart=always`. Ensure the unit's `node` is 22.13+/24
+  (the server needs the built-in `node:sqlite`) — pin the fnm/nvm node path if the distro
+  `/usr/bin/node` is older.
 - **Windows:** a **Scheduled Task** (`cc-bus start`, At-Logon, restart-on-failure) or NSSM
   service. At-Logon (user context) is needed so `~/.claude/.cross-claude-bus` resolves.
 
