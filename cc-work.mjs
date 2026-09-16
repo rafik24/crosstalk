@@ -19,6 +19,7 @@
 // Exit 0 on success, 1 on failure (incl. a lost claim), 2 on bad usage.
 // ---------------------------------------------------------------------------
 import { resolveFast, loadConfig } from "./cc-discover.mjs";
+import { pkgVersion } from "./cc-rev.mjs";   // x-cc-version — the fleet version gate refuses a mismatch
 
 const WORK_STATES = ["queued", "claimed", "implementing", "in-review", "merged", "deployed", "blocked", "abandoned"];
 
@@ -65,7 +66,7 @@ if (hardPin) {
 async function api(method, path, body) {
   const r = await fetch(BASE + "/api" + path, {
     method,
-    headers: { Authorization: "Bearer " + TOKEN, "content-type": "application/json" },
+    headers: { Authorization: "Bearer " + TOKEN, "content-type": "application/json", "x-cc-version": pkgVersion() || "" },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await r.text();

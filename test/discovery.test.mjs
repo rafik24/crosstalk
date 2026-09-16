@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { whoami, resolveFull, resolveFast, cacheLeader, outranks } from '../cc-discover.mjs';
+import { pkgVersion } from '../cc-rev.mjs';   // x-cc-version — the /api plane is version-gated
 import { createServer as createNetServer } from 'node:net';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -115,7 +116,7 @@ try {
   assert.ok('rev' in w0, 'whoami carries a rev field (drift detection)');
   const post = await fetch('http://127.0.0.1:8792/api/messages', {
     method: 'POST',
-    headers: { Authorization: 'Bearer tt', 'content-type': 'application/json' },
+    headers: { Authorization: 'Bearer tt', 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
     body: JSON.stringify({ channel: 'general', sender: 'disc-test', content: 'bump the watermark' }),
   });
   assert.equal(post.status, 200, 'message posted');

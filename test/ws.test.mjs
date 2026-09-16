@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { whoami } from '../cc-discover.mjs';
+import { pkgVersion } from '../cc-rev.mjs';   // raw WS clients must send &v= (the fleet version gate)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(__dirname, '..', 'server', 'server.mjs');
@@ -33,7 +34,7 @@ process.env.CC_PORT = String(PORT);
 const BASE = `http://127.0.0.1:${PORT}`;
 const TOKEN = 'tt';
 const DATA = mkdtempSync(join(tmpdir(), 'ccws-data-'));
-const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' };
 
 function boot(epoch) {
   return spawn(process.execPath, [SERVER], {
@@ -63,7 +64,7 @@ try {
   // --- A + B: raw WS client, addressed vs. not ---
   if (typeof WebSocket === 'undefined') { console.error('❌ Node lacks a built-in WebSocket client — cannot run WS test'); process.exit(1); }
   const frames = [];
-  const cli = new WebSocket(`ws://127.0.0.1:${PORT}/cc/ws?identity=alice&token=${TOKEN}`);
+  const cli = new WebSocket(`ws://127.0.0.1:${PORT}/cc/ws?identity=alice&token=${TOKEN}&v=${pkgVersion()}`);
   await new Promise((res, rej) => { cli.addEventListener('open', res); cli.addEventListener('error', rej); setTimeout(rej, 8000); });
   cli.addEventListener('message', (ev) => { try { const f = JSON.parse(ev.data); if (f.type === 'msg') frames.push(f.message); } catch {} });
 
@@ -82,7 +83,7 @@ try {
 
   // --- E: a firehose subscriber (the operator console, ?firehose=1) DOES get ambient traffic ---
   const fh = []; let hello = null;
-  const cli2 = new WebSocket(`ws://127.0.0.1:${PORT}/cc/ws?identity=console&token=${TOKEN}&firehose=1`);
+  const cli2 = new WebSocket(`ws://127.0.0.1:${PORT}/cc/ws?identity=console&token=${TOKEN}&firehose=1&v=${pkgVersion()}`);
   cli2.addEventListener('message', (ev) => { try { const f = JSON.parse(ev.data); if (f.type === 'hello') hello = f; if (f.type === 'msg') fh.push(f.message); } catch {} });
   await new Promise((res, rej) => { cli2.addEventListener('open', res); cli2.addEventListener('error', rej); setTimeout(rej, 8000); });
   await sleep(200);

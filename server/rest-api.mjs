@@ -95,6 +95,8 @@ export function createRestRouter(db) {
     run(async (req, res) => {
       const { instance_id, description, rev } = req.body || {};
       if (!isFilledString(instance_id)) return reject(res, 'instance_id is required');
+      // (The fleet version gate is enforced for the whole /api plane by versionGateMiddleware in
+      // server.mjs — see version-gate.mjs — so a stale caller is already refused 426 before here.)
       // #5 backstop: canonicalize the short name so a rejoin re-attaches its dm channel and no
       // slug variant forks a duplicate peer. The response echoes the canonical id the client holds.
       const canonical = canonicalizeIdentity(instance_id);

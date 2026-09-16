@@ -23,11 +23,11 @@
 // flooded) but DOES show the messages of any channel created after startup —
 // including a DM channel someone opens to you. Pass --from-start to replay all.
 // ---------------------------------------------------------------------------
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
-import { revString } from './cc-rev.mjs';
+import { revString, pkgVersion } from './cc-rev.mjs';
 import { wrapForNotification } from './cc-render.mjs';
 
 const args = process.argv.slice(2);
@@ -61,7 +61,8 @@ const fromStart = args.includes('--from-start');
 // (--channel means "I'm watching this collaboration — show me all of it"). Otherwise, on the
 // default all-channels watch, only messages ADDRESSED to me wake the session.
 const FIREHOSE = ALL || ONLY !== null;
-const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+// x-cc-version on EVERY /api call — the data-plane version gate refuses a mismatch. See version-gate.mjs.
+const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' };
 
 // Liveness beacon — the must-listen gate reads this file's mtime to confirm this session is
 // actually RECEIVING (cc-poll running), not merely registered once by the join hook.
@@ -71,6 +72,9 @@ function beat() { try { mkdirSync(LIVE_DIR, { recursive: true }); writeFileSync(
 
 async function j(path, opts = {}) {
   const r = await fetch(BASE + path, { ...opts, headers: { ...H, ...(opts.headers || {}) } });
+  // A version-gate 426 on ANY /api call is fatal — surface it now rather than spin the poll loop
+  // silently until the next register() tick notices. See version-gate.mjs.
+  if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} failVersionGate(info); }
   if (!r.ok) throw new Error(path + ' → ' + r.status);
   return r.json();
 }
@@ -78,8 +82,29 @@ async function j(path, opts = {}) {
 const cursors = {};
 async function register() {
   beat();
-  try { await j('/api/register', { method: 'POST', body: JSON.stringify({ instance_id: instance, description: process.env.CC_DESC || '', rev: revString() }) }); }
-  catch {}
+  try {
+    const r = await fetch(BASE + '/api/register', {
+      method: 'POST', headers: { ...H },
+      body: JSON.stringify({ instance_id: instance, description: process.env.CC_DESC || '', rev: revString(), version: pkgVersion() }),
+    });
+    if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} failVersionGate(info); }
+  } catch {}
+}
+
+// Bus refused us for a version mismatch — fatal + actionable. Print to STDOUT (surfaces as a
+// Monitor event), drop the beacon so the listen-gate blocks edits at once, then exit. Mirrors cc-ws.
+function failVersionGate(info) {
+  try { rmSync(LIVE_FILE, { force: true }); } catch {}
+  const req = info.required || '?';
+  const mine = info.yours || pkgVersion() || 'unknown';
+  console.log([
+    '',
+    `⛔ CHAT BUS — VERSION GATE: this host runs ${mine} but the bus requires ${req}.`,
+    info.how_to_update || `Update the crosstalk plugin on this host to ${req}, then re-arm receive.`,
+    `Every host must run the same latest version. (Operator override: CC_VERSION_GATE_BYPASS=1 on the bus leader.)`,
+    '',
+  ].join('\n'));
+  process.exit(1);
 }
 
 async function tick(seed = false) {

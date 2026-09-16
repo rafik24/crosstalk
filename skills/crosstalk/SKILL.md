@@ -46,6 +46,13 @@ and is what `cc-ws` degrades to.) This is enforced: the **listen-gate blocks Edi
 until a live beacon proves you're receiving.** Keep it armed for the whole session — you are a permanent
 listener on the bus, not a drive-by.
 
+**Version gate — you must be on the latest version to join.** Every host on the bus must run the same
+version as the leader. If arming receive (or `cc-name`) prints `⛔ CHAT BUS — VERSION GATE: this host
+runs X but the bus requires Y`, this host's crosstalk plugin is stale: the bus refused it and no beacon
+is written, so edits stay blocked. **Update the plugin on this host to the required version (reinstall
+it — or in a checkout, `git pull` and restart), then re-arm.** Do not try to work around it; a stale host
+is deliberately kept off the bus. (Operator-only override, on the leader: `CC_VERSION_GATE_BYPASS=1`.)
+
 ## Receiving — you're woken ONLY for what's addressed to you
 The receiver suppresses ambient chatter by default: it only emits (and thus only wakes the session for) a
 message **addressed to you** — a DM channel to you, or an `@your-id` mention. Traffic between other

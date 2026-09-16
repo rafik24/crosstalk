@@ -376,6 +376,8 @@
   let firstChannels = true;  // don't flag everything as "new" on first load
   let ok = false, timer = null, hbTimer = null, pollFails = 0;
   let leaderRev = null;      // running-code rev of the current bus leader (from /cc/whoami)
+  let leaderVersion = null;  // release version the bus requires (from /cc/whoami); the console is a
+                             // follower/viewer, so it echoes this on every request to pass the version gate
   let ws = null, wsOpen = false, wsFirehose = false, wsTimer = null, wsBackoff = 2000, needBackfill = true; // push transport
   let pollN = 0;             // poll counter: with push up, the per-channel REST sweep runs every 4th tick
   let typeFilter = null, senderFilter = null, meOnly = false;                            // stream filters
@@ -395,7 +397,10 @@
   const save = () => localStorage.setItem(LS, JSON.stringify({ base: $('base').value.trim(), token: $('token').value, me: $('me').value.trim(), chanWin: Number($('chanWin').value)||15, partWin: Number($('partWin').value)||15, showAllParts: showAllParts(), showAllChans: showAllChans(), peers: $('peers').value.trim(), boardOn: $('showBoard').checked, notify: $('notify').checked }));
   const saveViewed = () => localStorage.setItem(LS + '.viewed', JSON.stringify(viewedAt));
   const base = () => $('base').value.trim().replace(/\/$/, '');
-  const hdr = () => ({ 'Authorization': 'Bearer ' + $('token').value.trim() });
+  // Echo the leader's own version so the console (a viewer that follows the leader) passes the fleet
+  // version gate on every /api call. Before the first whoami resolves leaderVersion is null → the call
+  // may 426 and simply retry once discovery populates it.
+  const hdr = () => ({ 'Authorization': 'Bearer ' + $('token').value.trim(), 'x-cc-version': leaderVersion || '' });
   const me = () => $('me').value.trim() || 'po-console';
 
   // ---- leader discovery (browser analog of cc-discover's resolveFast) ------------------------
@@ -418,7 +423,7 @@
       if (!r.ok) return null;
       const j = await r.json();
       if (typeof j.epoch !== 'number') return null;
-      return { base: b, host: j.host, epoch: j.epoch, role: j.role || 'leader', rev: j.rev || null };
+      return { base: b, host: j.host, epoch: j.epoch, role: j.role || 'leader', rev: j.rev || null, version: j.version || null };
     } catch { return null; } finally { clearTimeout(t); }
   }
   async function discoverLeader() {
@@ -434,6 +439,7 @@
     responders.sort((a, b) => (b.epoch - a.epoch) || String(a.host).localeCompare(String(b.host)));
     const best = responders[0];
     leaderRev = best.rev || null;
+    leaderVersion = best.version || null;
     localStorage.setItem(LS + '.leader', JSON.stringify({ base: best.base, host: best.host, epoch: best.epoch }));
     return best;
   }
@@ -813,7 +819,7 @@
   // is ignored. On close we back off (2 s → 30 s) and reconnect; every (re)open flags a backfill.
   // ?firehose=1 asks the hub for every message (lanes get only what is addressed to them). An
   // older leader ignores it and pushes addressed traffic only; the hello frame tells us which.
-  const wsUrl = () => { const b = base(); return b ? b.replace(/^http/, 'ws') + '/cc/ws?identity=' + encodeURIComponent(me()) + '&token=' + encodeURIComponent($('token').value.trim()) + '&firehose=1' : null; };
+  const wsUrl = () => { const b = base(); return b ? b.replace(/^http/, 'ws') + '/cc/ws?identity=' + encodeURIComponent(me()) + '&token=' + encodeURIComponent($('token').value.trim()) + '&firehose=1&v=' + encodeURIComponent(leaderVersion || '') : null; };
   function closeWs() {
     if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
     if (ws) { const s = ws; ws = null; try { s.onclose = null; s.onmessage = null; s.close(); } catch {} }

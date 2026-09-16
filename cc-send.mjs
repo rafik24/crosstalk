@@ -10,6 +10,7 @@
 // 'all' is sugar for the #general channel (broadcast). Exit 0 on success, 1 otherwise.
 // ---------------------------------------------------------------------------
 import { resolveFast, loadConfig } from './cc-discover.mjs';
+import { pkgVersion } from './cc-rev.mjs';   // x-cc-version — the fleet version gate refuses a mismatch
 
 const a = process.argv.slice(2);
 const sender = a[0], toArg = a[1];
@@ -32,7 +33,7 @@ const channel = toArg === 'all' ? 'general' : toArg;
 
 const r = await fetch(BASE + '/api/messages', {
   method: 'POST',
-  headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+  headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
   body: JSON.stringify({ channel, sender, content: body, message_type: type }),
 });
 if (!r.ok) { console.error('send failed:', r.status, await r.text().catch(() => '')); process.exit(1); }

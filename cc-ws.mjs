@@ -23,11 +23,11 @@
 //   env: CC_BASE, CC_TOKEN, CC_DESC
 // Zero deps (Node's built-in global WebSocket client; hand-rolled framing on the server).
 // ---------------------------------------------------------------------------
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
-import { revString } from './cc-rev.mjs';
+import { revString, pkgVersion } from './cc-rev.mjs';
 import { addressedTo, renderLine, wrapForNotification } from './cc-render.mjs';
 
 const args = process.argv.slice(2);
@@ -44,7 +44,9 @@ const ONLY = opt('--channel', null);
 const fromStart = args.includes('--from-start');
 // Firehose (emit ambient too) when explicitly asked (--all) or scoped to ONE channel.
 const FIREHOSE = args.includes('--all') || ONLY !== null;
-const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+// x-cc-version on EVERY /api call (register, poll-receive, …) — the data-plane version gate refuses a
+// mismatch, so a stale host is blocked from coordinating, not just from registering. See version-gate.mjs.
+const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' };
 const shortId = instance.split('/').pop();
 
 let BASE = null;
@@ -66,13 +68,38 @@ function beat() { try { mkdirSync(LIVE_DIR, { recursive: true }); writeFileSync(
 
 async function j(path, opts = {}) {
   const r = await fetch(BASE + path, { ...opts, headers: { ...H, ...(opts.headers || {}) } });
+  // A version-gate 426 on ANY /api call (not just register) is fatal — surface it now rather than
+  // let the poll loop spin silently until the next register() tick notices. See version-gate.mjs.
+  if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} failVersionGate(info); }
   if (!r.ok) throw new Error(path + ' → ' + r.status);
   return r.json();
 }
+// The bus refused us for running the wrong version. This is a fatal, actionable terminal state
+// (not routine lifecycle chatter), so print it to STDOUT — that surfaces it as a Monitor event the
+// operator sees — then drop the beacon so the listen-gate blocks edits at once, and exit.
+function failVersionGate(info) {
+  try { rmSync(LIVE_FILE, { force: true }); } catch {}
+  const req = info.required || '?';
+  const mine = info.yours || pkgVersion() || 'unknown';
+  console.log([
+    '',
+    `⛔ CHAT BUS — VERSION GATE: this host runs ${mine} but the bus requires ${req}.`,
+    info.how_to_update || `Update the crosstalk plugin on this host to ${req}, then re-arm receive.`,
+    `Every host must run the same latest version. (Operator override: CC_VERSION_GATE_BYPASS=1 on the bus leader.)`,
+    '',
+  ].join('\n'));
+  process.exit(1);
+}
+
 async function register() {
   beat();
-  try { await j('/api/register', { method: 'POST', body: JSON.stringify({ instance_id: instance, description: process.env.CC_DESC || '', rev: revString() }) }); }
-  catch {}
+  try {
+    const r = await fetch(BASE + '/api/register', {
+      method: 'POST', headers: { ...H },
+      body: JSON.stringify({ instance_id: instance, description: process.env.CC_DESC || '', rev: revString(), version: pkgVersion() }),
+    });
+    if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} failVersionGate(info); }
+  } catch {}
 }
 
 // --- cursors + dedup + spaced emit (shared by push and poll/backfill) ---
@@ -143,7 +170,8 @@ function wsUrl() {
   // leader base is http://host:port → ws://host:port/cc/ws. The token is sent in the
   // Authorization header (below), NOT the URL, so it never lands in a log/proxy line (H1).
   const b = BASE.replace(/^http/, 'ws').replace(/\/$/, '');
-  return `${b}/cc/ws?identity=${encodeURIComponent(instance)}`;
+  // &v carries our release version so the upgrade is version-gated too (belt-and-braces to /register).
+  return `${b}/cc/ws?identity=${encodeURIComponent(instance)}&v=${encodeURIComponent(pkgVersion() || '')}`;
 }
 
 async function connectWS() {

@@ -25,6 +25,7 @@
 // ---------------------------------------------------------------------------
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { addressedTo } from '../cc-render.mjs';
+import { versionGateReject } from './version-gate.mjs';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
@@ -136,7 +137,7 @@ export function originAllowed(origin, req, allowedOrigins, allowFileOrigin = fal
 //          drive this path in a loop; REST alone being throttled would leave a token oracle).
 //   ?firehose=1: the operator console asks for EVERY message, not just the addressed ones the
 //          lanes get. Still token-gated, still never echoes a socket its own sends.
-export function attachWsHub(httpServer, { token, log = () => {}, allowedOrigins = [], allowFileOrigin = false, authFailLimiter = null, clientIp = (req) => req.socket?.remoteAddress || '' } = {}) {
+export function attachWsHub(httpServer, { token, log = () => {}, allowedOrigins = [], allowFileOrigin = false, authFailLimiter = null, clientIp = (req) => req.socket?.remoteAddress || '', serverVersion = null, versionGateBypass = false } = {}) {
   // identity -> Set<socket>. A box may briefly hold two (old + reconnect) — both get the push.
   const conns = new Map();
 
@@ -173,6 +174,17 @@ export function attachWsHub(httpServer, { token, log = () => {}, allowedOrigins 
       socket.write(lim.limited
         ? `HTTP/1.1 429 Too Many Requests\r\nRetry-After: ${lim.retryAfterSec}\r\nConnection: close\r\n\r\n`
         : 'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    // Fleet version gate on the push channel — applied to EVERY upgrade, firehose included, so a stale
+    // client cannot open a firehose socket to receive traffic while skipping the gate. The browser
+    // console carries the leader's own version as &v= (it is a follower/viewer), so it always matches
+    // and is never locked out. Placed after the origin + constant-time token checks: a 426 is only
+    // reachable post-auth, never an unauthenticated version oracle. See version-gate.mjs.
+    const vg = versionGateReject(url.searchParams.get('v') || '', serverVersion, { bypass: versionGateBypass });
+    if (vg) {
+      socket.write(`HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n`);
       socket.destroy();
       return;
     }

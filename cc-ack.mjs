@@ -17,6 +17,7 @@
 // Follow up with a `done` (cc-send --type done) when the work actually lands.
 // ---------------------------------------------------------------------------
 import { resolveFast, loadConfig } from './cc-discover.mjs';
+import { pkgVersion } from './cc-rev.mjs';   // x-cc-version — the fleet version gate refuses a mismatch
 
 const a = process.argv.slice(2);
 const sender = a[0], toArg = a[1];
@@ -35,7 +36,7 @@ const content = `ACK — ${note} · taken into lane ${sender}`;
 
 const r = await fetch(BASE + '/api/messages', {
   method: 'POST',
-  headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+  headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
   body: JSON.stringify({ channel, sender, content, message_type: 'response' }),
 });
 if (!r.ok) { console.error('ack failed:', r.status, await r.text().catch(() => '')); process.exit(1); }
