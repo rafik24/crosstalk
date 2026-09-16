@@ -21,6 +21,12 @@ import http from 'node:http';
 import express from 'express';
 
 import { startServer } from '../server/server.mjs';
+import { pkgVersion } from '../cc-rev.mjs';   // WS upgrades must carry &v= (the fleet version gate)
+
+// This suite exercises auth / origin / wiring, NOT the fleet version gate (test/version-gate.test.mjs
+// owns that). Bypass the gate here so the many REST calls that don't carry x-cc-version aren't 426'd.
+// Own process, so this env never leaks to the other suites.
+process.env.CC_VERSION_GATE_BYPASS = '1';
 
 const PORT = 8822;              // spec-mandated port for the authoritative pass
 const SMOKE_PORT = 8843;        // separate origin for the real-module smoke, so the
@@ -237,7 +243,7 @@ async function main() {
   // Raw WS handshake → resolves to the HTTP status (101 on success). Node's WebSocket client
   // hides the status of a refused upgrade; http.request surfaces it via 'response'.
   const upgrade = (port, { origin, token, identity = 'probe' } = {}) => new Promise((resolve) => {
-    const q = `identity=${identity}${token ? '&token=' + encodeURIComponent(token) : ''}`;
+    const q = `identity=${identity}${token ? '&token=' + encodeURIComponent(token) : ''}&v=${pkgVersion()}`;
     const req = http.request({
       host: '127.0.0.1', port, path: '/cc/ws?' + q,
       headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==', ...(origin ? { Origin: origin } : {}) },

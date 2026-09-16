@@ -26,7 +26,8 @@ import express from 'express';
 import { createDB } from './db.mjs';
 import { createRestRouter } from './rest-api.mjs';
 import { attachWsHub, originAllowed } from './ws-hub.mjs';
-import { codeRev } from '../cc-rev.mjs';
+import { versionGateMiddleware } from './version-gate.mjs';
+import { codeRev, pkgVersion } from '../cc-rev.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -156,6 +157,16 @@ export async function startServer(opts = {}) {
   const makeDB = opts.createDB ?? createDB;
   const makeRouter = opts.createRestRouter ?? createRestRouter;
 
+  // Fleet version gate (see version-gate.mjs): this leader is the authority on "the latest version"
+  // — a client whose release version != ours is refused (426) on both REST /register and the WS
+  // upgrade, forcing it to update. Tests may pin the version via opts.serverVersion; a boot reads it
+  // from pkgVersion(). CC_VERSION_GATE_BYPASS admits everyone (rollout/emergency), logged loud below.
+  const serverVersion = opts.serverVersion ?? pkgVersion();
+  const versionGateBypass = opts.versionGateBypass ?? !!process.env.CC_VERSION_GATE_BYPASS;
+  if (versionGateBypass) log('⚠️  VERSION GATE BYPASS active — every client version is admitted (CC_VERSION_GATE_BYPASS).');
+  else if (!serverVersion) log('⚠️  version gate DISABLED — leader could not read its own version (package.json); admitting all clients (fail-open).');
+  else log(`[version-gate] enforcing: clients must run ${serverVersion}`);
+
   const db = await makeDB();
 
   // Data watermark: the highest message id this leader has served, tracked IN MEMORY so
@@ -222,6 +233,7 @@ export async function startServer(opts = {}) {
     res.json({
       role: 'leader', host: config.host, epoch: config.epoch, base: config.baseUrl,
       watermark, rev: code.rev, dirty: code.dirty,
+      version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
     });
   });
 
@@ -295,7 +307,7 @@ export async function startServer(opts = {}) {
 
   // ---- WebSocket hub + push wiring -------------------------------------------------
   const server = http.createServer(app);
-  const hub = attachWsHub(server, { token: config.apiKey, log, allowedOrigins: config.allowedOrigins, allowFileOrigin: config.allowFileOrigin, authFailLimiter, clientIp });
+  const hub = attachWsHub(server, { token: config.apiKey, log, allowedOrigins: config.allowedOrigins, allowFileOrigin: config.allowFileOrigin, authFailLimiter, clientIp, serverVersion, versionGateBypass });
 
   // Decorate sendMessage so every insert fans out over the socket hub (see file header).
   const rawSendMessage = db.sendMessage.bind(db);
@@ -312,7 +324,10 @@ export async function startServer(opts = {}) {
   };
 
   // ---- Mount the authed REST API ---------------------------------------------------
-  app.use('/api', requireAuth, writeLimit, makeRouter(db));
+  // versionGateMiddleware sits AFTER requireAuth (never a pre-auth oracle) and BEFORE the router, so
+  // it gates the WHOLE data plane — send, poll-receive, work-claim, data — not just /register. This is
+  // what makes a stale host actually unable to coordinate, rather than merely warned. See version-gate.mjs.
+  app.use('/api', requireAuth, versionGateMiddleware({ serverVersion, versionGateBypass }), writeLimit, makeRouter(db));
 
   // Fresh SQLite snapshot for replication/migration. Postgres has no local file → 501.
   app.get('/cc/export', requireAdmin, async (_req, res, next) => {

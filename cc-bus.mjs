@@ -31,7 +31,7 @@ import {
   loadConfig, resolveFull, whoami, cacheLeader, readCache, outranks, DEFAULT_PORT,
 } from './cc-discover.mjs';
 import { startBeacon } from './cc-beacon.mjs';
-import { revString } from './cc-rev.mjs';
+import { revString, pkgVersion } from './cc-rev.mjs';
 import { canonicalShort } from './cc-render.mjs';
 import { dataDir } from './cc-paths.mjs';
 
@@ -212,11 +212,12 @@ async function registerSupervisor(id, role, epoch, token, port) {
   try {
     await fetch(base + '/api/register', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
       body: JSON.stringify({
         instance_id: id,
         description: `supervisor ${role || 'starting'} epoch ${epoch}`,
         rev: revString(),
+        version: pkgVersion(),
       }),
     });
   } catch {}
@@ -428,10 +429,16 @@ async function cmdStatus() {
   if (leader) {
     const mine = revString();
     const leaderRev = leader.rev || 'unknown';
-    console.log(`LEADER: ${leader.host}  epoch=${leader.epoch}  watermark=${leader.watermark ?? 0}  base=${leader.base}  rev=${leaderRev}`);
-    console.log(`THIS NODE: ${hostname()}  rev=${mine}  local-supervisor=${supervisorLive() ? 'running' : 'none'}`);
-    if (leader.rev && mine !== 'unknown' && mine !== leader.rev) {
-      console.log(`⚠️  CODE DRIFT — this checkout (${mine}) differs from the leader (${leader.rev}). git pull && restart the bus to sync.`);
+    const myVer = pkgVersion() || 'unknown';
+    const leaderVer = leader.version || 'unknown';
+    console.log(`LEADER: ${leader.host}  epoch=${leader.epoch}  watermark=${leader.watermark ?? 0}  base=${leader.base}  rev=${leaderRev}  version=${leaderVer}`);
+    console.log(`THIS NODE: ${hostname()}  rev=${mine}  version=${myVer}  local-supervisor=${supervisorLive() ? 'running' : 'none'}`);
+    // Version mismatch is now ENFORCED (the bus refuses a non-matching client, see version-gate.mjs),
+    // so surface it prominently — a stale host here is one that would be blocked from joining.
+    if (leader.version && myVer !== 'unknown' && myVer !== leaderVer) {
+      console.log(`⛔ VERSION MISMATCH — this host (${myVer}) ≠ the bus (${leaderVer}); this host is BLOCKED from the bus until it updates. Reinstall the plugin (or git pull && restart), then re-arm.`);
+    } else if (leader.rev && mine !== 'unknown' && mine !== leader.rev) {
+      console.log(`⚠️  CODE DRIFT — same version (${myVer}) but this checkout (${mine}) differs from the leader (${leader.rev}). git pull && restart the bus to sync.`);
     }
     await reportCoverage(leader, cfg.token);
   } else {
@@ -465,7 +472,7 @@ export function failoverCoverage(instances, leaderHost) {
 async function reportCoverage(leader, token) {
   let instances = [];
   try {
-    const r = await fetch(leader.base + '/api/instances', { headers: { Authorization: 'Bearer ' + token } });
+    const r = await fetch(leader.base + '/api/instances', { headers: { Authorization: 'Bearer ' + token, 'x-cc-version': pkgVersion() || '' } });
     if (r.ok) instances = (await r.json()).instances || [];
   } catch { /* fail-soft: coverage is advisory */ }
 
@@ -652,7 +659,7 @@ async function cmdMigrate(args) {
   try {
     await fetch(targetBase + '/api/messages', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
       body: JSON.stringify({ channel: 'general', sender: `cc-bus/${HOST}`, message_type: 'status', content: `@all bus MIGRATED: leader is now ${promoted.host} (epoch ${newEpoch}) @ ${targetBase}. Old leader ${leader.host} stepped down. Re-discovery is automatic.` }),
     });
   } catch {}

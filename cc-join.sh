@@ -116,6 +116,11 @@ mkdir -p "$LISTEN_DIR" 2>/dev/null || true
 rev=$(git -C "$PWD" rev-parse --short HEAD 2>/dev/null || true)
 [ -n "$rev" ] && [ -n "$(git -C "$PWD" status --porcelain 2>/dev/null)" ] && rev="${rev}+"
 
+# release version (package.json semver) — the fleet version gate refuses a host that is not on the
+# leader's version, so register MUST carry it or a current host is 426'd on every session start.
+# node is guaranteed present (checked above); read it from the plugin dir ($HERE, node-friendly).
+ver="$(node -e 'try{process.stdout.write(String(require(process.argv[1]+"/package.json").version||""))}catch{}' "$HERE" 2>/dev/null || true)"
+
 # register presence now (fail-soft — never wedge a session start), but report the outcome
 # HONESTLY: the header line must state whether the bus actually answered, not assume it did.
 # curl's %{http_code} is 000 when the connection never lands (server down / wrong host / DNS),
@@ -123,13 +128,14 @@ rev=$(git -C "$PWD" rev-parse --short HEAD 2>/dev/null || true)
 # on Windows git-bash (both ship curl). If curl is missing entirely, http_code is empty → treated
 # as "could not connect" — still honest. Never `exit` non-zero: a SessionStart hook must not wedge.
 http_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST "$CC_BASE/api/register" \
-  -H "Authorization: Bearer ${CC_TOKEN:-}" -H 'content-type: application/json' \
-  -d "{\"instance_id\":\"$ID\",\"description\":\"$topic @ $machine\",\"rev\":\"$rev\"}" 2>/dev/null || true)"
+  -H "Authorization: Bearer ${CC_TOKEN:-}" -H 'content-type: application/json' -H "x-cc-version: ${ver:-}" \
+  -d "{\"instance_id\":\"$ID\",\"description\":\"$topic @ $machine\",\"rev\":\"$rev\",\"version\":\"$ver\"}" 2>/dev/null || true)"
 
 case "$http_code" in
   2??)     JOIN_LINE="✅ LIVE CHAT BUS — CONNECTED, registered as: $ID   ($CC_BASE)" ;;
   000|"")  JOIN_LINE="⛔ LIVE CHAT BUS — COULD NOT CONNECT to $CC_BASE (server unreachable — is the bus service up?). Would join as: $ID" ;;
   401|403) JOIN_LINE="⛔ LIVE CHAT BUS — COULD NOT CONNECT: $CC_BASE rejected the token (HTTP $http_code — check CC_TOKEN in $CFG). Would join as: $ID" ;;
+  426)     JOIN_LINE="⛔ LIVE CHAT BUS — VERSION GATE: this host (${ver:-unknown}) is not on the bus's version. Every host must run the same latest version — update the crosstalk plugin on this host, then re-arm. Would join as: $ID" ;;
   *)       JOIN_LINE="⚠️ LIVE CHAT BUS — bus at $CC_BASE answered HTTP $http_code (not a clean register). Would join as: $ID" ;;
 esac
 

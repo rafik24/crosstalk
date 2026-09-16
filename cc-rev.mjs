@@ -14,7 +14,8 @@
 // Fail-soft: no git / not a checkout → { rev: null }, never throws.
 // ---------------------------------------------------------------------------
 import { execFileSync } from 'node:child_process';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = dirname(fileURLToPath(import.meta.url));   // this file lives at the repo root
@@ -34,4 +35,19 @@ export function codeRev() {
 export function revString() {
   const { rev, dirty } = codeRev();
   return rev ? rev + (dirty ? '+' : '') : 'unknown';
+}
+
+// The published RELEASE version (package.json semver). Unlike the git SHA above, this is present
+// for BOTH a git checkout AND a plugin-cache install (where codeRev() is 'unknown'), so it is the
+// only identity that works fleet-wide — which is why the bus version gate keys on it. Memoised;
+// fail-soft: an unreadable/absent package.json → null (the gate then fails OPEN, never bricks).
+let cachedPkg;
+export function pkgVersion() {
+  if (cachedPkg !== undefined) return cachedPkg;
+  try {
+    const raw = readFileSync(join(REPO, 'package.json'), 'utf8');
+    const v = JSON.parse(raw).version;
+    cachedPkg = (typeof v === 'string' && v) ? v : null;
+  } catch { cachedPkg = null; }
+  return cachedPkg;
 }

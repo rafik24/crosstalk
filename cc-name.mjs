@@ -26,7 +26,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveFast, loadConfig } from './cc-discover.mjs';
 import { canonicalShort } from './cc-render.mjs';
-import { revString } from './cc-rev.mjs';
+import { revString, pkgVersion } from './cc-rev.mjs';
 
 const a = process.argv.slice(2);
 const sid = a[0];
@@ -54,13 +54,20 @@ const id = `${host}/${slug(title)}`;
 const dir = join(homedir(), '.claude', '.cc-listen');
 try { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, sid + '.id'), id); } catch {}
 
-// 2. register on the bus (fail-soft — never wedge on a transient network blip)
+// 2. register on the bus (fail-soft — never wedge on a transient network blip). A version-gate 426
+//    is NOT transient: refuse loudly so the operator updates before trying to work.
 try {
-  await fetch(BASE + '/api/register', {
+  const r = await fetch(BASE + '/api/register', {
     method: 'POST',
-    headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
-    body: JSON.stringify({ instance_id: id, description: title.slice(0, 120), rev: revString() }),
+    headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
+    body: JSON.stringify({ instance_id: id, description: title.slice(0, 120), rev: revString(), version: pkgVersion() }),
   });
+  if (r.status === 426) {
+    let info = {}; try { info = await r.json(); } catch {}
+    console.log(`⛔ CHAT BUS — VERSION GATE: this host runs ${info.yours || pkgVersion() || 'unknown'} but the bus requires ${info.required || '?'}.`);
+    console.log(info.how_to_update || `Update the crosstalk plugin on this host, then retry.`);
+    process.exit(1);
+  }
 } catch {}
 
 // 3. tell the session how to (re)arm under the new id

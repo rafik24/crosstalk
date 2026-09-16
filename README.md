@@ -255,9 +255,48 @@ below raises the floor; it does not make the bus safe to expose to the open inte
   `/cc/import` read and WS frame buffer, and per-IP throttling of auth failures and message/claim
   churn (`429` on trip). Tunable via `CC_RL_*` / `CC_MAX_IMPORT_MB`.
 
+## Version gate — every host must run the latest version
+
+The bus refuses a host that is not on the **same version as the leader**, so a stale client is forced
+to update before it can coordinate (PO ruling 2026-09-16). The leader is the authority: a client whose
+release version (`package.json` semver, reported by `cc-rev.pkgVersion` — the only identity present for
+plugin installs too) does not **exactly** match the leader's is refused **HTTP 426 Upgrade Required**.
+The whole rule lives in one place — `server/version-gate.mjs`.
+
+- **Enforced across the WHOLE data plane, not just join.** `versionGateMiddleware` gates every `/api`
+  route (send, poll-receive, work-claim, data — *and* `/register`), and the `/cc/ws` upgrade is gated
+  too. So a stale host cannot register, send, receive-poll, or claim — it is genuinely off the bus, not
+  merely warned. (A signal on `/register` alone would let an old client that ignores the 426 keep
+  coordinating on the other routes.) Node clients carry their version in the **`x-cc-version` header** on
+  every request (and `&v=` on the WS URL); `cc-ws` / `cc-poll` print an update message, drop their
+  liveness beacon (so the listen-gate blocks edits at once) and exit on a 426; `cc-name` refuses to name
+  a stale session.
+- **Two fail-OPEN carve-outs** so the gate can never brick the whole bus: `CC_VERSION_GATE_BYPASS=1` on
+  the **leader** admits every version (rollout / emergency, logged loud at boot); and if the leader
+  cannot read its own version it admits everyone rather than lock out the fleet.
+- **The operator console is a viewer, not a host:** it echoes the *leader's* own version (read from
+  `/cc/whoami`) on its requests, so it always matches and is never locked out of watching the fleet —
+  without punching a `firehose` hole in the gate (every WS upgrade, firehose included, is checked).
+- **Rollout is a hard cutover — update the LEADER FIRST.** The leader defines the required version, and
+  election does not consider version, so a client updated *before* the leader is refused until the leader
+  catches up, and a stale node that wins election pins the requirement backwards. Upgrade (or fail over
+  to) the leader first, then roll the clients; `CC_VERSION_GATE_BYPASS=1` on the leader is the recovery
+  lever if you invert the order or a stale node leads. `cc-bus status` shows each node's `version=`.
+
+### Releasing (this is what forces the fleet)
+
+Bumping the version **is** the lever, so a release **must** bump BOTH pins in lockstep — they are
+compared against each other implicitly and a split will block hosts that are actually current:
+
+- `package.json` → `version`  (what the gate reads via `pkgVersion()`)
+- `.claude-plugin/plugin.json` → `version`  (the plugin identity Claude Code installs)
+
+Then publish the plugin and reinstall it on every host (`cc-bus status` shows each node's `version=` and
+flags a `⛔ VERSION MISMATCH`).
+
 ## Development
 
-Run the suite with `npm test` (render · db · rest · server · ws · discovery). Every test is
+Run the suite with `npm test` (render · db · rest · server · ws · discovery · version-gate). Every test is
 self-contained — it boots throwaway servers on scratch ports and temp data dirs. To exercise a
 change against an **isolated** bus while a real one is running, hard-pin the client at your instance:
 `node cc-work.mjs <cmd> --pin http://localhost:<port> --token <key>` — `--pin` bypasses discovery, so
