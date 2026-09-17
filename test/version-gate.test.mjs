@@ -43,6 +43,14 @@ const ok = (c, m) => { if (!c) { failed = true; console.error('❌', m); } else 
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
   const plug = JSON.parse(readFileSync(join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version;
   ok(pkg === plug, `version pins in lockstep: package.json (${pkg}) === plugin.json (${plug})`);
+
+  // pkgVersion() is what the server ACTUALLY feeds the gate as serverVersion. If its self-locating
+  // read resolves to the wrong dir (e.g. src/package.json after the reorg) it returns null and the
+  // gate fails OPEN — admitting every version. Assert it reads the real version, not null. The
+  // gate's own tests inject serverVersion, so only this check exercises the file read.
+  const { pkgVersion } = await import('../src/cc-rev.mjs');
+  const pv = pkgVersion();
+  ok(pv === pkg, `pkgVersion() reads the real package.json version (got ${JSON.stringify(pv)}, expected ${pkg}) — not null`);
 }
 
 // ---- Source guard: every first-party /api caller must send its version -------------------------

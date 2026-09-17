@@ -18,7 +18,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const REPO = dirname(fileURLToPath(import.meta.url));   // this file lives at the repo root
+// This file lives in src/; the repo root (which holds package.json + .git) is one level up.
+// codeRev() tolerates either (git -C walks up to .git), but pkgVersion() reads REPO/package.json,
+// so REPO must be the real root — otherwise it reads a non-existent src/package.json → null →
+// the version gate silently fails OPEN. (The src/ reorg moved this file without fixing this path.)
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 let cached = null;
 
 export function codeRev() {
