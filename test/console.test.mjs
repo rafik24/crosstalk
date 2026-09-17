@@ -3,7 +3,7 @@
 // so this asserts the token-in-hash contract without opening a browser or a socket.
 // Run: node test/console.test.mjs   (exits non-zero on any failed assertion)
 import assert from 'node:assert/strict';
-import { buildConsoleUrl, redirectHtml } from '../cc-console.mjs';
+import { buildConsoleUrl, redirectHtml } from '../src/cc-console.mjs';
 
 // buildConsoleUrl: base + token live in the HASH, trailing slash trimmed, path is /console.
 {

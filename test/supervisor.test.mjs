@@ -27,13 +27,13 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CC_BUS = join(__dirname, '..', 'cc-bus.mjs');
+const CC_BUS = join(__dirname, '..', 'src', 'cc-bus.mjs');
 
 // Scratch data dir — set before importing cc-bus so SUPERVISOR_FILE resolves under it.
 const DATA_DIR = mkdtempSync(join(tmpdir(), 'ccsup-'));
 process.env.CC_DATA_DIR = DATA_DIR;
 
-const { pidAlive, supervisorLive, SUPERVISOR_FILE, failoverCoverage } = await import('../cc-bus.mjs');
+const { pidAlive, supervisorLive, SUPERVISOR_FILE, failoverCoverage } = await import('../src/cc-bus.mjs');
 
 let failed = false;
 const ok = (cond, msg) => { if (!cond) { failed = true; console.error('  ✗', msg); } else { console.log('  ✓', msg); } };

@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrateDir, dataDir, configPath } from '../cc-paths.mjs';
-import { loadConfig } from '../cc-discover.mjs';
+import { migrateDir, dataDir, configPath } from '../src/cc-paths.mjs';
+import { loadConfig } from '../src/cc-discover.mjs';
 
 let failed = false;
 const ok = (c, m) => { if (!c) { failed = true; console.error('  ✗', m); } else console.log('  ✓', m); };

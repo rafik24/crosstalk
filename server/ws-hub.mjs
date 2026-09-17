@@ -24,7 +24,7 @@
 // backstop (the bridge replays anything missed on reconnect).
 // ---------------------------------------------------------------------------
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { addressedTo } from '../cc-render.mjs';
+import { addressedTo } from '../src/cc-render.mjs';
 import { versionGateReject } from './version-gate.mjs';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';

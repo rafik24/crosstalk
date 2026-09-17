@@ -2,6 +2,10 @@
 
 **The real-time backbone for a fleet of Claude Code agents — across every machine you run.**
 
+<p align="center">
+  <img src="docs/crosstalk-factory.png" alt="Crosstalk as a software factory: desktop, linux-box and laptop floors of AI-agent workers linked by one glowing real-time bus (build → test → review → deploy → docs), a shared kanban with an atomic claim-lock (no double-work), automatic failover rerouting an offline machine, and a glass operator console — all inside a self-hosted, no-cloud private campus." width="100%">
+</p>
+
 You already run more than one agent. Crosstalk makes them a *team*: sessions on any box — **Windows,
 Linux, or macOS** — discover each other in under a second, see who's online, split work behind a real
 distributed lock, and hand it off cleanly. All on your own network — **no server to stand up, no IP to
@@ -78,9 +82,9 @@ The same control surface ships as a CLI — for hacking on a clone, or for a hea
 run as an OS service (systemd / Scheduled Task) than via the hook-ensured supervisor:
 
 ```sh
-node cc-bus.mjs start     # elect: become leader if none present, else client + failover-watch
-node cc-bus.mjs ensure    # idempotent: start a supervisor here only if one isn't already running
-node cc-bus.mjs status    # the authoritative leader + estate failover coverage
+node src/cc-bus.mjs start     # elect: become leader if none present, else client + failover-watch
+node src/cc-bus.mjs ensure    # idempotent: start a supervisor here only if one isn't already running
+node src/cc-bus.mjs status    # the authoritative leader + estate failover coverage
 ```
 
 A dev clone needs a one-time `npm ci` (`express` + `zod`, both pure JS — the server uses Node's
@@ -98,7 +102,10 @@ SessionStart + PreToolUse hooks in [`hooks/hooks.json`](./hooks/hooks.json); the
 
 ## Files
 
-| file | role |
+The client + CLI scripts live in **`src/`**, the bus server in **`server/`**; the plugin manifest,
+hooks, skill, and reviewer agent sit in `.claude-plugin/`, `hooks/`, `skills/`, `agents/`.
+
+| file (`src/`) | role |
 |---|---|
 | `cc-bus.mjs` | **Supervisor + control CLI**: `start` (elect/supervise/failover), `ensure` (idempotent per-machine supervisor), `status` (leader + failover coverage), `receive` (standby target), `migrate`. |
 | `cc-discover.mjs` | **Discovery** — `resolveFast` (hot path) / `resolveFull` (merged scan); highest-epoch wins. Every client script imports it. |
@@ -206,10 +213,10 @@ alternative this hook-ensured approach deliberately trades away for simplicity.
 
 ```sh
 # on the target host: hold the port and await the DB
-node cc-bus.mjs receive
+node src/cc-bus.mjs receive
 
 # on (or with reach to) the current leader:
-node cc-bus.mjs migrate --to <host|ip|host:port> --confirm
+node src/cc-bus.mjs migrate --to <host|ip|host:port> --confirm
 ```
 
 `migrate` refuses unless the target is reachable **and** in `receive` (standby) **and**
@@ -315,7 +322,7 @@ flags a `⛔ VERSION MISMATCH`).
 Run the suite with `npm test` (render · db · rest · server · ws · discovery · version-gate). Every test is
 self-contained — it boots throwaway servers on scratch ports and temp data dirs. To exercise a
 change against an **isolated** bus while a real one is running, hard-pin the client at your instance:
-`node cc-work.mjs <cmd> --pin http://localhost:<port> --token <key>` — `--pin` bypasses discovery, so
+`node src/cc-work.mjs <cmd> --pin http://localhost:<port> --token <key>` — `--pin` bypasses discovery, so
 the command can't route to a higher-epoch live leader.
 
 > On **Windows + Node 24**, a non-fatal `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` line

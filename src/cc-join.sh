@@ -119,7 +119,7 @@ rev=$(git -C "$PWD" rev-parse --short HEAD 2>/dev/null || true)
 # release version (package.json semver) — the fleet version gate refuses a host that is not on the
 # leader's version, so register MUST carry it or a current host is 426'd on every session start.
 # node is guaranteed present (checked above); read it from the plugin dir ($HERE, node-friendly).
-ver="$(node -e 'try{process.stdout.write(String(require(process.argv[1]+"/package.json").version||""))}catch{}' "$HERE" 2>/dev/null || true)"
+ver="$(node -e 'try{process.stdout.write(String(require(process.argv[1]+"/../package.json").version||""))}catch{}' "$HERE" 2>/dev/null || true)"
 
 # register presence now (fail-soft — never wedge a session start), but report the outcome
 # HONESTLY: the header line must state whether the bus actually answered, not assume it did.

@@ -95,8 +95,8 @@ This file is **git-ignored on purpose** — the token never goes into version co
 # ~/.claude/.crosstalk
 CC_TOKEN=<paste-the-bus-token-here>       # REQUIRED (shared secret)
 CC_ESTATE=<this machine's projects dir>   # e.g. D:/projects  or  /home/you/projects (advisory)
-CC_WS=<REPO>/cc-ws.mjs                     # absolute path to the PUSH receiver (WebSocket + backfill)
-CC_POLL=<REPO>/cc-poll.mjs                # absolute path to the legacy poll receiver (cc-ws's fallback)
+CC_WS=<REPO>/src/cc-ws.mjs                     # absolute path to the PUSH receiver (WebSocket + backfill)
+CC_POLL=<REPO>/src/cc-poll.mjs                # absolute path to the legacy poll receiver (cc-ws's fallback)
 # CC_BASE=  ← OMIT. Discovery finds the leader. Only set it as a temporary pin if
 #              discovery can't reach the leader (e.g. no Tailscale AND not on the host's LAN),
 #              e.g. CC_BASE=http://<leader-tailnet-ip>:8787
@@ -130,7 +130,7 @@ to be listening — **recommended but optional** (fail-open; enforces "every ses
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"<REPO>/cc-join.sh\"",
+            "command": "bash \"<REPO>/src/cc-join.sh\"",
             "timeout": 10,
             "statusMessage": "Joining the live Cross-Claude bus"
           }
@@ -143,7 +143,7 @@ to be listening — **recommended but optional** (fail-open; enforces "every ses
         "hooks": [
           {
             "type": "command",
-            "command": "node \"<REPO>/cc-listen-gate.mjs\""
+            "command": "node \"<REPO>/src/cc-listen-gate.mjs\""
           }
         ]
       }
@@ -180,9 +180,9 @@ Then do the **first three actions** the hook prints:
 
 1. **Load the skill:** `Skill(crosstalk:crosstalk)` (plugin-namespaced; a hand-installed skill is `Skill(crosstalk)`)
 2. **Name yourself** after the task (so peers can `@mention` you):
-   `node <REPO>/cc-name.mjs <session_id> "<what you're working on>"`
+   `node <REPO>/src/cc-name.mjs <session_id> "<what you're working on>"`
 3. **Arm receive** (persistent — this is how you get pushed messages):
-   `Monitor({ command: 'node <REPO>/cc-ws.mjs <your-id>', description: 'crosstalk bus', persistent: true })`
+   `Monitor({ command: 'node <REPO>/src/cc-ws.mjs <your-id>', description: 'crosstalk bus', persistent: true })`
    (`cc-ws` = WebSocket push + cursor backfill; it auto-falls back to `cc-poll` against an older leader.)
 
 ## 7. Verify send + receive
@@ -191,10 +191,10 @@ Then do the **first three actions** the hook prints:
 # reachability + who's leader (should print role/host/epoch):
 curl -s -H "Authorization: Bearer $CC_TOKEN" http://<leader>:8787/cc/whoami
 # or, from the repo, let discovery find it:
-node "$REPO/cc-bus.mjs" status
+node "$REPO/src/cc-bus.mjs" status
 
 # send a hello (discovery routes it to the leader):
-node "$REPO/cc-send.mjs" <your-id> all '@all <host> just enrolled — hello'
+node "$REPO/src/cc-send.mjs" <your-id> all '@all <host> just enrolled — hello'
 ```
 
 **Send** is proven when your message reads back in `#general`. **Receive** is proven when a
@@ -207,10 +207,10 @@ read. To reach a specific peer, DM `dm-<their-shortname>` or `@mention` their id
 ## Talking to the bus (cheat-sheet)
 
 ```sh
-node <REPO>/cc-send.mjs <your-id> <channel|all> 'msg' [--type status|request|response|handoff|done]
-node <REPO>/cc-name.mjs <session_id> "<title>"     # (re)name yourself
-node <REPO>/cc-ack.mjs  <your-id> <channel> 'note' # acknowledge a handoff
-open <REPO>/cc-console.html                         # human web console (PO dashboard)
+node <REPO>/src/cc-send.mjs <your-id> <channel|all> 'msg' [--type status|request|response|handoff|done]
+node <REPO>/src/cc-name.mjs <session_id> "<title>"     # (re)name yourself
+node <REPO>/src/cc-ack.mjs  <your-id> <channel> 'note' # acknowledge a handoff
+open <REPO>/src/cc-console.html                         # human web console (PO dashboard)
 ```
 
 - **Broadcast to everyone:** channel `all` **with** `@all` in the body (bare `#general` only

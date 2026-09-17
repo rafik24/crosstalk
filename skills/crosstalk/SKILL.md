@@ -26,7 +26,7 @@ happen again). Immediately **rename yourself after this session's task/title** s
 the operator console is readable:
 
 ```
-node <live>/cc-name.mjs <session_id> "<what you're working on>"      # e.g. "Improve bus architecture"
+node <live>/src/cc-name.mjs <session_id> "<what you're working on>"      # e.g. "Improve bus architecture"
 ```
 
 `cc-name` writes the identity where the listen-gate reads it, registers it on the bus, and prints the exact
@@ -36,7 +36,7 @@ the same id the gate reads, or edits stay blocked).
 
 ## Always listen (mandatory) — arm receive as your first action after naming
 ```
-Monitor({ command: 'node <live>/cc-ws.mjs <your-id>', description: 'cross-claude bus (<your-id>)', persistent: true })
+Monitor({ command: 'node <live>/src/cc-ws.mjs <your-id>', description: 'cross-claude bus (<your-id>)', persistent: true })
 ```
 `cc-ws` is the real-time **PUSH** receiver: it holds a WebSocket open to the leader, so a message
 addressed to you wakes the session in under a second — no 2s counter. It also backfills over REST on
@@ -71,7 +71,7 @@ receiver with `--all`, or `--channel <ch>` to watch one collaboration channel in
 **Broadcast to EVERY session — use `@all`** (or `@here` / `@everyone`). That keyword pierces the
 addressed-only filter and wakes everyone; a broadcast without it reaches only the console. So:
 ```
-node <live>/cc-send.mjs <your-id> all '@all RED main — everyone stop pushing'
+node <live>/src/cc-send.mjs <your-id> all '@all RED main — everyone stop pushing'
 ```
 Use `@all` sparingly — it wakes every session, so it's for estate-wide signals, not routine chatter.
 
@@ -93,7 +93,7 @@ what you own**, you MUST acknowledge it into the SAME channel so the sender — 
 was **taken into a lane**, not dropped. An unacked handoff is flagged on the dashboard until you ack.
 
 ```
-node <live>/cc-ack.mjs <your-id> <channel> "the bus rework — into my lane now"
+node <live>/src/cc-ack.mjs <your-id> <channel> "the bus rework — into my lane now"
 ```
 
 The bus only allows six message types (`message · request · response · status · handoff · done`), so an ack is
@@ -148,9 +148,9 @@ open your own PR: the branch/PR is the last-chance dedup.
 
 ## Sending
 ```
-node <live>/cc-send.mjs <your-id> <channel|all> 'message' --type <type>
-node <live>/cc-name.mjs <session_id> "<title>"      # (re)name yourself
-node <live>/cc-ack.mjs  <your-id> <channel> 'note'  # acknowledge a handoff
+node <live>/src/cc-send.mjs <your-id> <channel|all> 'message' --type <type>
+node <live>/src/cc-name.mjs <session_id> "<title>"      # (re)name yourself
+node <live>/src/cc-ack.mjs  <your-id> <channel> 'note'  # acknowledge a handoff
 ```
 - **Broadcast** → channel `all` (the `#general` channel). **DM** → `dm-<peer-shortname>` (the peer's id after
   the `/`). `@mention` in any channel also reaches them tagged `»TO YOU«`.
@@ -158,10 +158,10 @@ node <live>/cc-ack.mjs  <your-id> <channel> 'note'  # acknowledge a handoff
   ownership semantics; a `handoff` obliges the receiver to `ack`.
 
 ## The operator console (dashboard)
-Run `node <live>/cc-console.mjs` — it discovers the current leader and opens your browser at
+Run `node <live>/src/cc-console.mjs` — it discovers the current leader and opens your browser at
 `<leader>/console` (the leader hosts the page; the token rides in the URL hash, never sent to the server).
-`node <live>/cc-console.mjs serve --port 8799` runs a loopback redirector that follows failover, or open
-`<live>/cc-console.html` directly. It shows **only channels + participants active in the last 15 min** (both
+`node <live>/src/cc-console.mjs serve --port 8799` runs a loopback redirector that follows failover, or open
+`<live>/src/cc-console.html` directly. It shows **only channels + participants active in the last 15 min** (both
 windows adjustable in the settings strip; a "show all" toggle reveals the rest), **highlights channels with
 new content since you last looked** (amber dot), autocompletes **`@name`** in the composer (type `@`, arrow-
 keys, Enter), and banners any **unacked handoff**. The operator watches it and may DM you or broadcast.

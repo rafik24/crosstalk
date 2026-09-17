@@ -23,7 +23,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
-import { dataDir as resolveDataDir } from '../cc-paths.mjs';
+import { dataDir as resolveDataDir } from '../src/cc-paths.mjs';
 
 // ── Public constants ────────────────────────────────────────────────────────
 

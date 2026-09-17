@@ -14,12 +14,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { whoami } from '../cc-discover.mjs';
-import { pkgVersion } from '../cc-rev.mjs';   // raw WS clients must send &v= (the fleet version gate)
+import { whoami } from '../src/cc-discover.mjs';
+import { pkgVersion } from '../src/cc-rev.mjs';   // raw WS clients must send &v= (the fleet version gate)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(__dirname, '..', 'server', 'server.mjs');
-const BRIDGE = join(__dirname, '..', 'cc-ws.mjs');
+const BRIDGE = join(__dirname, '..', 'src', 'cc-ws.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Hermetic from the real estate (same guarding as discovery.test) — PLUS pin CC_PORT to our

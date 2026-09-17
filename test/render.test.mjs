@@ -3,7 +3,7 @@
 // notification wrapping that fixes DM truncation.
 //   node test/render.test.mjs
 import assert from 'node:assert';
-import { addressedTo, isAtAll, renderLine, wrapForNotification, WRAP_WIDTH, MAX_LINES_PER_BLOCK, canonicalShort, shortIdOf } from '../cc-render.mjs';
+import { addressedTo, isAtAll, renderLine, wrapForNotification, WRAP_WIDTH, MAX_LINES_PER_BLOCK, canonicalShort, shortIdOf } from '../src/cc-render.mjs';
 
 let failed = false;
 const ok = (cond, msg) => { try { assert.ok(cond, msg); } catch (e) { failed = true; console.error('❌', e.message); } };

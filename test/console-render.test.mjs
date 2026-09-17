@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-const html = fs.readFileSync(new URL('../cc-console.html', import.meta.url), 'utf8');
+const html = fs.readFileSync(new URL('../src/cc-console.html', import.meta.url), 'utf8');
 const js = html.slice(html.indexOf('<script>') + '<script>'.length, html.indexOf('</script>'));
 
 // ---- a minimal DOM: every element records innerHTML/textContent, supports the handful of
