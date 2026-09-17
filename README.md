@@ -1,34 +1,40 @@
 # Crosstalk
 
-**A near-real-time coordination bus for AI coding agents — across your machines.**
+**The real-time backbone for a fleet of Claude Code agents — across every machine you run.**
 
-Crosstalk is the live link between the Claude Code (or any HTTP/WebSocket-speaking) agent sessions
-you run — on one machine or many, on **Windows, Linux, or macOS**. Sessions message each other in
-under a second, see who else is online, and coordinate through a shared human console. One clone on
-any node can **host** the bus or **connect** to whoever is hosting — **no configured server IP, no
-cloud account, no external database.** The whole bus is a single local SQLite file any node can carry.
+You already run more than one agent. Crosstalk makes them a *team*: sessions on any box — **Windows,
+Linux, or macOS** — discover each other in under a second, see who's online, split work behind a real
+distributed lock, and hand it off cleanly. All on your own network — **no server to stand up, no IP to
+configure, no cloud, no external database.** The whole bus is a single local SQLite file that any node
+can carry, host, or take over the instant the host drops.
+
+Install it as **one Claude Code plugin** and every session you launch is already on the bus.
 
 ## What is Crosstalk
 
 It doesn't just carry the chatter — it's the layer that makes multi-agent work **reliable and
 visible**. Agents **declare** what they're doing and **atomically claim** it on a shared work board:
-a claim is a real distributed lock, so two agents *cannot* silently pick up the same task — and you
-can see, live, who owns what and what state it's in.
+a claim is a genuine distributed lock, so two agents *cannot* silently grab the same task — and you
+watch, live, who owns what and what state it's in.
 
-- **Talk** — sub-second push messaging, DMs, broadcasts, typed hand-offs with an ack contract, and presence.
+- **Talk** — sub-second WebSocket push: DMs, broadcasts, `@mentions`, typed hand-offs with an ack
+  contract, and presence. You're woken **only for what's addressed to you** — the firehose stays off
+  your terminal, on the console where it belongs.
 - **Coordinate** — a work board (epic → task, `queued → … → deployed`) with an **atomic claim-lock** so
-  nothing gets double-done, and hand-offs that transfer ownership cleanly. *(The smart part — routing
-  work to whoever's best-placed by context/knowledge — is a protocol the agents run on top; Crosstalk
-  enforces it with the lock and makes it observable on the board and console.)*
-- **Survive** — durable history + cursor backfill (nothing missed while a session was away), leader
-  election, DB replication, and failover with no single point of failure.
-- **Stay yours** — self-hosted on a trusted network (tailnet/LAN), **secure-by-default** (bearer +
-  admin scope, loopback-default bind, rate limits), zero external services.
-- **Just work** — ships as a Claude Code **plugin**: install it and every session auto-joins.
+  nothing is double-done, and hand-offs that transfer ownership cleanly. *(Routing work to whoever's
+  best-placed is a protocol the agents run on top; Crosstalk enforces it with the lock and makes it
+  observable on the board and console.)*
+- **Survive** — durable history + cursor backfill (nothing missed while a session slept), leader
+  election, live DB replication, and failover with **no single point of failure**.
+- **Stay yours** — self-hosted on your tailnet/LAN, **secure-by-default** (bearer + admin scope,
+  loopback-default bind, origin allowlist, rate limits). Your agents' traffic never leaves your network.
+- **Just works** — one-command plugin install; the SessionStart hook auto-joins every session and keeps
+  a self-healing supervisor alive per machine. **Nothing to run by hand.**
 
-We built cross-agent messaging before Claude Code had native inter-agent comms; native now has
-messaging and a shared task list, but Crosstalk adds **cross-machine reach, persistence, a real
-distributed lock, self-hosting + failover, and an operator console**.
+Native Claude Code now has in-session messaging and a shared task list. Crosstalk is for when you've
+outgrown a single machine: **cross-machine reach, persistence, a real distributed lock, self-hosting +
+automatic failover, a version-gated fleet, and a live operator console** — the coordination plane for an
+estate of agents, not one host.
 
 ## Self-hosting + zero-config discovery
 
@@ -57,19 +63,29 @@ Then create the config `~/.claude/.crosstalk` (shared token). That's it — **ho
 build**: the server stores everything in Node's built-in `node:sqlite`, so a bare `claude plugin
 install` can host the bus on any node (Node 22.13+/24). Full step-by-step: **[`ENROLLMENT.md`](./ENROLLMENT.md)**.
 
-## Quick start (running the bus directly)
+## Quick start — nothing to run by hand
+
+After the plugin install above, **you're done.** Every Claude Code session's SessionStart hook
+auto-joins the bus, and with `CC_AUTO_SUPERVISOR=1` in `~/.claude/.crosstalk` it keeps exactly one bus
+supervisor alive per machine (idempotent, fail-soft) — so any box with a live session can host and
+carries failover capacity by construction. Sessions talk through the shipped `crosstalk` skill; you
+watch the whole fleet at `<leader>/console`. No scripts to start, no server to babysit.
+
+<details>
+<summary><b>Driving the bus by hand (dev clone / headless host)</b></summary>
+
+The same control surface ships as a CLI — for hacking on a clone, or for a headless host you'd rather
+run as an OS service (systemd / Scheduled Task) than via the hook-ensured supervisor:
 
 ```sh
-npm ci                       # installs express + zod (pure JS; node 22.13+/24, server uses built-in node:sqlite)
-node cc-bus.mjs start        # elect: become leader if none present, else client + failover-watch
-node cc-bus.mjs ensure       # idempotent: start a supervisor here only if one isn't already running
-node cc-bus.mjs status       # the authoritative leader + estate failover coverage
+node cc-bus.mjs start     # elect: become leader if none present, else client + failover-watch
+node cc-bus.mjs ensure    # idempotent: start a supervisor here only if one isn't already running
+node cc-bus.mjs status    # the authoritative leader + estate failover coverage
 ```
 
-Per host, run `cc-bus start` as a small daemon (systemd unit on Linux, Scheduled
-Task / nssm on Windows) — or set `CC_AUTO_SUPERVISOR=1` and let each session's `cc-join.sh`
-hook `cc-bus ensure` one for you (see **Self-healing supervisors + coverage**). The `cc-join.sh`
-SessionStart hook otherwise stays advisory; its register + Monitor base come from discovery.
+A dev clone needs a one-time `npm ci` (`express` + `zod`, both pure JS — the server uses Node's
+built-in `node:sqlite`, so there's no native build). A plugin install already ships these.
+</details>
 
 ## Enrolling a new Claude Code CLI install
 
