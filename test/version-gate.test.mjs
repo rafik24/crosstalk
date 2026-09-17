@@ -59,11 +59,20 @@ const ok = (c, m) => { if (!c) { failed = true; console.error('❌', m); } else 
 // the join hook + the two cc-bus fetches that shipped without it. Each listed client must carry the
 // header (or, for the register-only shell hook, the header + a version body field).
 {
-  const CALLERS = ['cc-ws.mjs', 'cc-poll.mjs', 'cc-send.mjs', 'cc-ack.mjs', 'cc-work.mjs',
-                   'cc-name.mjs', 'cc-bus.mjs', 'cc-console.html', 'cc-join.sh'];
+  const CALLERS = ['cc-receive.mjs', 'cc-poll.mjs', 'cc-send.mjs', 'cc-ack.mjs', 'cc-work.mjs',
+                   'cc-name.mjs', 'cc-bus.mjs', 'cc-console.html', 'cc-join.sh',
+                   'cc-codex.mjs', 'codex-join.sh'];
   for (const f of CALLERS) {
     const src = readFileSync(join(ROOT, 'src', f), 'utf8');
     ok(/x-cc-version/i.test(src), `${f} sends its version (x-cc-version) on bus requests`);
+  }
+  // Since 3.2.0 the receivers are thin sinks over the engine: they inherit the header (REST + the
+  // WS upgrade's &v=) by IMPORTING cc-receive.mjs. A receiver that stops importing it, or grows its
+  // own fetch, must carry the header itself — so: either the import, or the header, never neither.
+  for (const f of ['cc-ws.mjs', 'cc-codex-bridge.mjs']) {
+    const src = readFileSync(join(ROOT, 'src', f), 'utf8');
+    ok(/from '\.\/cc-receive\.mjs'/.test(src) || /x-cc-version/i.test(src), `${f} receives through cc-receive.mjs (inherits x-cc-version) or sends it itself`);
+    ok(!/fetch\(|new WebSocket\(/.test(src) || /x-cc-version/i.test(src), `${f} has no bus call of its own without the version header`);
   }
 }
 

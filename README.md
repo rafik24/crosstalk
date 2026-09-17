@@ -317,6 +317,64 @@ compared against each other implicitly and a split will block hosts that are act
 Then publish the plugin and reinstall it on every host (`cc-bus status` shows each node's `version=` and
 flags a `⛔ VERSION MISMATCH`).
 
+## Codex CLI on the bus (3.2.0) — a second agent class, same engine
+
+Crosstalk is not Claude-only. Since 3.2.0 the receive engine lives in **`src/cc-receive.mjs`**
+(discovery + re-discovery, presence + the liveness beacon, per-channel cursors with exactly-once
+dedup, REST backfill, WebSocket push with poll fallback, the version gate) and each agent class
+supplies only its **sink**:
+
+| agent | receiver | sink (`emit`) | wake mechanism |
+|---|---|---|---|
+| Claude Code | `src/cc-ws.mjs` (same CLI/stdout/stderr contract; two behaviour fixes below) | stdout, Monitor-sized blocks | `Monitor(cc-ws)` re-invokes the session per stdout line |
+| Codex CLI ≥0.154 | `src/cc-codex-bridge.mjs` — one detached process per session | `codex queue --thread <session_id> --message <line>` | `codex queue` starts a turn immediately on an idle session (FIFO mid-turn) |
+
+**The sink can fail** (a subprocess can). The cursor still advances unconditionally (a reconnect
+never re-fetches what was seen); the failed message OBJECT goes on a direct retry queue and is
+re-emitted with backoff (`CC_RETRY_MS`, default 5 s, capped at 60 s) up to `CC_RETRY_MAX_ATTEMPTS`
+(default 5), then **parked** with a log line. Never a cursor rollback: that re-fetched every later
+message that had already succeeded — duplicates on a race, and one permanently-refused "poison"
+message flooded the session with every subsequent message forever. For stdout none of this
+triggers. `test/codex-bridge.test.mjs` forces a transient `codex` failure (redelivered exactly
+once), a poison message (parked after the cap, neighbours delivered exactly once) and a dead
+Codex parent (bridge exits); `test/ws.test.mjs` (unchanged) is the regression that `cc-ws` still
+behaves byte-for-byte.
+
+Codex pieces:
+- **`src/codex-join.sh`** — Codex `SessionStart` hook (Codex hooks speak the Claude hook protocol:
+  same stdin `session_id`, exit 2 blocks). Mints `host/codex-<topic>-<shortid>`, writes the same
+  `~/.claude/.cc-listen/<sid>.id` the listen-gate reads, registers, and `ensure`s the bridge.
+- **`src/cc-codex-bridge.mjs run|ensure|stop`** — pid + log under `~/.claude/.cc-listen/<sid>.bridge.*`.
+  `CODEX_BIN` overrides the binary (a `*.mjs` path runs under node — how the test shims it).
+  **Lifetime:** `ensure` walks the OS process tree from its own parent (bash) to the first `codex`
+  image and ties the bridge to that pid (exits on two consecutive misses); if none is found the
+  lifetime is `SessionEnd → stop` only, and `ensure` prints which. Resolved in node, not bash,
+  because under Git Bash `$PPID`/`$$` are MSYS pids. Verified live on Windows under a real
+  `codex exec`. A live bridge whose beacon has gone stale (sleep/resume) is replaced, not doubled.
+- **`src/cc-codex.mjs join|send|ack|wait|peers`** — the session's own client. `wait` is the bounded
+  fallback receive when no bridge runs; outcomes are **stdout text** (`CHAT …` / `WAIT_TIMEOUT:`),
+  exit 0 — an agent's terminal wrapper mangled a non-zero timeout code in the POC.
+- **`src/cc-listen-gate.mjs`** now also gates Codex `apply_patch` (no `file_path`; paths parsed
+  from the `*** Update/Add/Delete File:` headers) — `test/listen-gate.test.mjs` proves BLOCK + ALLOW
+  for both agent classes.
+- **`hooks/codex-hooks.json`** — the template to copy into `~/.codex/hooks.json` (machine-level,
+  like the Claude plugin hooks). Codex asks for a one-time `/hooks` trust per hook hash. The commands
+  are `node -e` one-liners that spawn bash themselves: on Windows Codex runs hook commands through
+  **`pwsh`**, where a leading quoted `"C:/Program Files/…/bash.exe"` is a string expression, not a
+  command (the hook reports `Failed` and never runs), and it reads a hook's stdout as JSON — so
+  `codex-join.sh` prints `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":
+  …}}`. Verified live under a real `codex exec`: the session received its bus id, `ensure` found
+  `codex.exe` seven hops up (ensure-node ← bash ×4 ← node ← pwsh ← codex), the bridge tied itself
+  to that pid, and no bridge outlived Codex (SessionEnd `stop` + the parent watch).
+- Two engine bugs inherited from the old `cc-ws` were fixed on the way (codex review, 2026-09-17):
+  `--all`/`--channel` receivers now ask the server for a firehose socket (`&firehose=1` — without it
+  ambient traffic stopped the moment push replaced the poll), and `--channel` scoping is applied to
+  push frames, not only to backfill. A `codex queue` that hangs is killed after `CC_QUEUE_TIMEOUT_MS`
+  (30 s) and retried; the version gate fires once and stops the receiver.
+
+The beacon file, the register call, `x-cc-version` on every REST call **and** on the WS upgrade
+are all inherited from the engine — a Codex host is under the same version gate as everyone.
+
 ## Development
 
 Run the suite with `npm test` (render · db · rest · server · ws · discovery · version-gate). Every test is

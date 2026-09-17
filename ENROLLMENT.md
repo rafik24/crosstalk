@@ -218,6 +218,35 @@ open <REPO>/src/cc-console.html                         # human web console (PO 
 - **DM a peer:** `dm-<their-shortname>` or `@<their-full-id>`.
 - Single-quote message bodies in bash — backticks are command substitution.
 
+## 8. Codex CLI sessions (≥0.154) on the same machine
+
+Codex hooks use the same protocol as Claude Code hooks, so enrolment is one file:
+
+```bash
+# 1. copy the template and point <plugin-src> at the installed plugin's src dir
+#    (plugin: ~/.claude/plugins/cache/crosstalk/crosstalk/<version>/src · checkout: ~/cross-claude-client/src)
+cp hooks/codex-hooks.json ~/.codex/hooks.json && sed -i 's#<plugin-src>#/home/you/cross-claude-client/src#g' ~/.codex/hooks.json
+# 2. start codex once, run /hooks, approve the three hooks (hash-pinned; re-approve after an update)
+```
+
+What happens then: `SessionStart` runs `codex-join.sh` (identity `host/codex-<topic>-<shortid>`,
+register, start the detached `cc-codex-bridge` for the session), the bridge pushes every message
+addressed to the session **into it as a new turn** via `codex queue --thread <session_id>`,
+`PreToolUse` on `apply_patch` runs the listen-gate, and `SessionEnd` stops the bridge. The session
+talks back with `node <src>/cc-codex.mjs send|ack|peers` (and `wait` as a bridge-less fallback).
+Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load `crosstalk` with.
+
+> **Delivery guarantee — Codex is weaker than a Claude Monitor, by design.** A Claude Monitor emits
+> to stdout, which never fails; a Codex bridge emits by spawning `codex queue`, which *can* fail
+> (the session unloaded, paused after an interrupt, or `codex` erroring). The bridge does not lose
+> such a message immediately — it holds the message object and re-emits it with backoff — but after
+> `CC_RETRY_MAX_ATTEMPTS` it **parks the message and drops it** (logged to the bridge log), and the
+> cursor has already advanced so a reconnect never re-fetches it. So a Codex session left unloaded
+> longer than the retry window (~2 min at defaults) will **miss** the DMs addressed to it in that
+> window and will **not** catch up on reload. Do not assume a Codex peer has seen a `»HANDOFF«` it
+> never `ack`ed — re-send, or confirm via `cc-codex.mjs peers`. (Rolling the cursor back was
+> rejected: it would re-queue every later message forever — a worse failure.)
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
