@@ -33,7 +33,8 @@ const CC_BUS = join(__dirname, '..', 'src', 'cc-bus.mjs');
 const DATA_DIR = mkdtempSync(join(tmpdir(), 'ccsup-'));
 process.env.CC_DATA_DIR = DATA_DIR;
 
-const { pidAlive, supervisorLive, SUPERVISOR_FILE, failoverCoverage } = await import('../src/cc-bus.mjs');
+const { pidAlive, supervisorLive, SUPERVISOR_FILE, failoverCoverage, SERVER_ENTRY } = await import('../src/cc-bus.mjs');
+const { existsSync } = await import('node:fs');
 
 let failed = false;
 const ok = (cond, msg) => { if (!cond) { failed = true; console.error('  ✗', msg); } else { console.log('  ✓', msg); } };
@@ -42,6 +43,12 @@ function writeSup(rec) { writeFileSync(SUPERVISOR_FILE, JSON.stringify(rec)); }
 function clearSup() { try { rmSync(SUPERVISOR_FILE); } catch {} }
 
 try {
+  // --- SERVER_ENTRY resolves to a real file --------------------------------------------------
+  // spawnLeader spawns SERVER_ENTRY; if this self-locating path is wrong (e.g. the src/ reorg
+  // left it pointing at src/server/server.mjs), every leader start crash-loops the bus. No
+  // in-process test spawns a real server, so this existence check is the only guard.
+  ok(existsSync(SERVER_ENTRY), `SERVER_ENTRY resolves to an existing server module (${SERVER_ENTRY})`);
+
   // --- pidAlive ------------------------------------------------------------------------------
   ok(pidAlive(process.pid) === true, 'pidAlive(self) is true');
   // A very high pid is almost certainly not a running process (and pidAlive must say so).

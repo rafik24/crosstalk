@@ -36,7 +36,10 @@ import { canonicalShort } from './cc-render.mjs';
 import { dataDir } from './cc-paths.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER_ENTRY = join(__dirname, 'server', 'server.mjs');
+// This file lives in src/, but the server is at repo-root server/server.mjs — hop up out of src/.
+// (The src/ reorg moved this file without updating this self-locating path; a wrong entry makes
+// spawnLeader spawn a missing module → supervisor crash-loop → total bus blackout.)
+const SERVER_ENTRY = join(__dirname, '..', 'server', 'server.mjs');
 const HOST = process.env.CC_HOST || hostname();
 const DATA_DIR = dataDir();   // ~/.crosstalk (migrated from ~/.cross-claude-mcp once); CC_DATA_DIR overrides
 const EPOCH_FILE = join(DATA_DIR, 'epoch');
@@ -712,8 +715,11 @@ function argOf(args, name) { const i = args.indexOf(name); return i >= 0 ? args[
 
 // Exported for the test suite (the singleton decision logic + the coverage host-matching). The
 // CLI runs only when this file is executed directly (below), so importing it for a test is inert.
-export { supervisorLive, pidAlive, SUPERVISOR_FILE };
+export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY };
 // (failoverCoverage is exported at its definition above.)
+// SERVER_ENTRY is exported so a test can assert it resolves to a file that actually exists —
+// a self-locating path that points at a missing module makes spawnLeader crash-loop the bus,
+// which no in-process test catches (the supervisor test never spawns a real server).
 
 // --- main (only when run directly, not when imported by a test) ---
 const invokedDirectly =
