@@ -3,9 +3,11 @@
 //
 // The RECEIVE side is cc-receive.mjs (the shared push+backfill engine). This is its
 // counterpart: the one-shot writes a session makes — register presence, send a message,
-// ack a handoff, list peers — factored out of cc-codex.mjs so a second client (the pi
-// extension, src/pi/crosstalk-core.mjs) does not re-implement discovery, the auth + version
-// header, or the /api call shapes. Discovery, token and the version header are the plugin's
+// ack a handoff, list peers — a reusable write client so a second client (the pi extension,
+// src/pi/crosstalk-core.mjs) does not re-implement discovery, the auth + version header, or the
+// /api call shapes. (It mirrors cc-codex.mjs's write surface but is a PARALLEL implementation —
+// cc-codex.mjs was NOT changed to consume it; the two can drift, so keep them in step or migrate
+// cc-codex.mjs onto this client later.) Discovery, token and the version header are the plugin's
 // own (cc-discover / cc-rev), so this client is subject to the same fleet version gate as
 // every host.
 //

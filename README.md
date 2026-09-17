@@ -400,7 +400,8 @@ no bridge daemon, no forked receiver. The design was settled live with a pi sess
   extension IS the receiver, so pi needs no external listen-gate — the beacon proves liveness the
   same way.
 - **Tools** `bus_send` / `bus_ack` / `bus_peers` (TypeBox params) are thin REST wrappers over the
-  shared **`src/cc-client.mjs`** (`register`/`send`/`ack`/`peers`, factored out of `cc-codex.mjs`).
+  shared **`src/cc-client.mjs`** (`register`/`send`/`ack`/`peers` — a reusable write client that
+  mirrors `cc-codex.mjs`'s surface; a parallel implementation, not yet a shared de-dup).
   No blocking `wait` tool: inbound already arrives as a turn, so a block-until-reply tool could hang
   the session. `/bus` prints identity · leader · pending.
 - **Version gate** (426) → `ctx.ui.notify(…, 'error')` once, then stop — pi is under the same fleet
