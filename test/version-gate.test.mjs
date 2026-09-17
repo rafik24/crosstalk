@@ -59,9 +59,12 @@ const ok = (c, m) => { if (!c) { failed = true; console.error('❌', m); } else 
 // the join hook + the two cc-bus fetches that shipped without it. Each listed client must carry the
 // header (or, for the register-only shell hook, the header + a version body field).
 {
+  // cc-client.mjs (the raw-fetch write client the pi extension uses) is included since 3.3.0 — it
+  // makes bus /api calls of its own, so the guard must watch it like every other caller (it shares
+  // one header object across its fetches, so a dropped header removes the string entirely here).
   const CALLERS = ['cc-receive.mjs', 'cc-poll.mjs', 'cc-send.mjs', 'cc-ack.mjs', 'cc-work.mjs',
                    'cc-name.mjs', 'cc-bus.mjs', 'cc-console.html', 'cc-join.sh',
-                   'cc-codex.mjs', 'codex-join.sh'];
+                   'cc-codex.mjs', 'codex-join.sh', 'cc-client.mjs'];
   for (const f of CALLERS) {
     const src = readFileSync(join(ROOT, 'src', f), 'utf8');
     ok(/x-cc-version/i.test(src), `${f} sends its version (x-cc-version) on bus requests`);
