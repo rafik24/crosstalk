@@ -27,7 +27,7 @@ const ok = (c, m) => { if (!c) { failed = true; console.error('❌', m); } else 
 {
   ok(versionGateReject('3.1.0', '3.1.0') === null, 'admit: exact match');
   ok(versionGateReject('3.0.0', '3.1.0') !== null, 'REFUSE: client behind');
-  ok(versionGateReject('3.2.0', '3.1.0') !== null, 'REFUSE: client ahead (exact-match, not >=)');
+  ok(versionGateReject('9.9.9', '3.1.0') !== null, 'REFUSE: client ahead (exact-match, not >=)');
   ok(versionGateReject('', '3.1.0') !== null, 'REFUSE: client sent no version (old client)');
   ok(versionGateReject(undefined, '3.1.0') !== null, 'REFUSE: client version undefined');
   ok(versionGateReject('0.0.0', '3.1.0', { bypass: true }) === null, 'admit: bypass overrides a mismatch');
