@@ -6,7 +6,8 @@
 // call and can be told to FAIL. Asserts:
 //   A. a DM to the bridge's identity reaches `codex queue --thread <sid> --message …` in <2s, exactly once;
 //   B. FORCED FAILURE: with the shim failing, the message is attempted but NOT lost — once the shim
-//      recovers, the engine's rollback + backfill retry redelivers it exactly once (the authority's
+//      recovers, the engine's direct retry queue (the failed message object is held and re-emitted;
+//      the cursor is never rolled back) redelivers it exactly once (the authority's
 //      cursor-advance-vs-emit-failure flag);
 //   C. ambient traffic is not queued; D. `stop --session` kills the bridge and clears the pid file;
 //   E. no `fatal: not a git repository` leak on stderr from cc-rev (codeRev stdio guard).
