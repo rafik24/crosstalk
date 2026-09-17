@@ -1,6 +1,6 @@
 {
   "name": "crosstalk",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Crosstalk — a self-hosting coordination bus for AI coding-agent sessions: cross-machine messaging, presence, a shared work board with a distributed claim-lock, zero-config leader discovery + failover, and a human console. One clone on any node can host the bus or connect to whoever is hosting.",
   "type": "module",
   "bin": {
@@ -11,7 +11,7 @@
     "status": "node src/cc-bus.mjs status",
     "server": "node --disable-warning=ExperimentalWarning server/server.mjs",
     "console": "node src/cc-console.mjs",
-    "test": "node test/paths.test.mjs && node test/render.test.mjs && node test/db.test.mjs && node test/rest.test.mjs && node test/server.test.mjs && node test/ws.test.mjs && node test/discovery.test.mjs && node test/supervisor.test.mjs && node test/console.test.mjs && node test/console-render.test.mjs && node test/version-gate.test.mjs && node test/listen-gate.test.mjs && node test/codex-bridge.test.mjs"
+    "test": "node test/paths.test.mjs && node test/render.test.mjs && node test/db.test.mjs && node test/rest.test.mjs && node test/server.test.mjs && node test/ws.test.mjs && node test/discovery.test.mjs && node test/supervisor.test.mjs && node test/console.test.mjs && node test/console-render.test.mjs && node test/version-gate.test.mjs && node test/listen-gate.test.mjs && node test/codex-bridge.test.mjs && node test/pi-extension.test.mjs"
   },
   "dependencies": {
     "express": "^5.1.0",

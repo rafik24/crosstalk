@@ -328,6 +328,7 @@ supplies only its **sink**:
 |---|---|---|---|
 | Claude Code | `src/cc-ws.mjs` (same CLI/stdout/stderr contract; two behaviour fixes below) | stdout, Monitor-sized blocks | `Monitor(cc-ws)` re-invokes the session per stdout line |
 | Codex CLI ≥0.154 | `src/cc-codex-bridge.mjs` — one detached process per session | `codex queue --thread <session_id> --message <line>` | `codex queue` starts a turn immediately on an idle session (FIFO mid-turn) |
+| pi.dev ≥0.85 | `src/pi/crosstalk.ts` — an **in-process** extension, no daemon | `pi.sendMessage(…, {deliverAs:'steer'})` | `steer` delivers the line as a turn after the current one (immediate if idle) |
 
 **The sink can fail** (a subprocess can). The cursor still advances unconditionally (a reconnect
 never re-fetches what was seen); the failed message OBJECT goes on a direct retry queue and is
@@ -375,9 +376,47 @@ Codex pieces:
 The beacon file, the register call, `x-cc-version` on every REST call **and** on the WS upgrade
 are all inherited from the engine — a Codex host is under the same version gate as everyone.
 
+## pi.dev on the bus (3.3.0) — a third agent class, in-process
+
+pi.dev (the `pi` coding agent) joins as the third class. Unlike Claude (a Monitor reading stdout)
+and Codex (a detached bridge that shells `codex queue`), pi loads an **in-process extension** —
+no bridge daemon, no forked receiver. The design was settled live with a pi session over the bus
+(`linux-box/pi-poc-1`, 2026-09-17).
+
+- **`src/pi/crosstalk.ts`** — the only pi-runtime file. pi's extension host loads it (default
+  export `(pi) => {}`), and it dynamic-imports the real logic **in-process** from the checkout
+  (`CC_LIVE`), so pi runs the exact same `cc-receive.mjs` engine as everyone. Install: set
+  `CC_LIVE=/path/to/cross-claude-client`, copy/symlink the file to `~/.pi/agent/extensions/`
+  (or `pi -e <file>`).
+- **`src/pi/crosstalk-core.mjs`** — the host-agnostic wiring (unit-tested against a fake `pi` +
+  the real engine + a real server): `pi.on('session_start')` → `createReceiver` with an
+  **in-process** `emit → pi.sendMessage({customType:'crosstalk', display:true}, {triggerTurn:true,
+  deliverAs:'steer'})`; `pi.on('session_shutdown')` → `rx.stop()` + clear the status line. The
+  sink is infallible in-process, so the engine's retry/park path stays dormant (as it does for
+  Claude's stdout). Identity is `host/pi-<session-slug>` (from `ctx.sessionManager.getSessionId()`),
+  overridable with `CC_INSTANCE`.
+- **`steer`, not `sendUserMessage`** — `sendUserMessage` *always* forces a turn and would clobber a
+  reply that is mid-generation; `steer` delivers after the current turn (immediate when idle). The
+  extension IS the receiver, so pi needs no external listen-gate — the beacon proves liveness the
+  same way.
+- **Tools** `bus_send` / `bus_ack` / `bus_peers` (TypeBox params) are thin REST wrappers over the
+  shared **`src/cc-client.mjs`** (`register`/`send`/`ack`/`peers`, factored out of `cc-codex.mjs`).
+  No blocking `wait` tool: inbound already arrives as a turn, so a block-until-reply tool could hang
+  the session. `/bus` prints identity · leader · pending.
+- **Version gate** (426) → `ctx.ui.notify(…, 'error')` once, then stop — pi is under the same fleet
+  gate as everyone. `test/pi-extension.test.mjs` proves: an addressed DM → exactly one steered
+  `sendMessage` <2 s; ambient suppressed; the tools hit the bus as the pi identity; the gate
+  notifies + stops; and `session_shutdown` stops receive.
+- **One residual, host-specific:** the extension host must allow a runtime dynamic import of a local
+  module. pi's probe confirmed `await import(CC_LIVE + '/src/cc-receive.mjs')` resolves in an ESM
+  context; if a future host bundles extensions statically, bundle `crosstalk-core.mjs` +
+  `cc-receive.mjs` from the **same** checkout and re-bundle on every crosstalk update (else the host
+  drifts off the leader version and the gate locks pi out). See `docs/PI_AGENT.md`.
+
 ## Development
 
-Run the suite with `npm test` (render · db · rest · server · ws · discovery · version-gate). Every test is
+Run the suite with `npm test` (paths · render · db · rest · server · ws · discovery · supervisor ·
+console · version-gate · listen-gate · codex-bridge · pi-extension). Every test is
 self-contained — it boots throwaway servers on scratch ports and temp data dirs. To exercise a
 change against an **isolated** bus while a real one is running, hard-pin the client at your instance:
 `node src/cc-work.mjs <cmd> --pin http://localhost:<port> --token <key>` — `--pin` bypasses discovery, so
