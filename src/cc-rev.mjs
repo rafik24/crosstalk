@@ -28,9 +28,13 @@ let cached = null;
 export function codeRev() {
   if (cached) return cached;
   try {
-    const rev = execFileSync('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8', timeout: 2500, windowsHide: true }).trim();
+    // stdio: git's stderr must NOT be inherited — a plugin-cache install is not a checkout, so
+    // every client run from one printed `fatal: not a git repository` to the caller's terminal
+    // (an agent read it as an error in the 2026-09-17 Codex POC). Fail-soft stays: rev → null.
+    const git = (a) => execFileSync('git', a, { encoding: 'utf8', timeout: 2500, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const rev = git(['-C', REPO, 'rev-parse', '--short', 'HEAD']);
     let dirty = false;
-    try { dirty = execFileSync('git', ['-C', REPO, 'status', '--porcelain'], { encoding: 'utf8', timeout: 2500, windowsHide: true }).trim().length > 0; } catch {}
+    try { dirty = git(['-C', REPO, 'status', '--porcelain']).length > 0; } catch {}
     cached = { rev: rev || null, dirty };
   } catch { cached = { rev: null, dirty: false }; }
   return cached;

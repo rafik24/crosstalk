@@ -11,14 +11,34 @@
 // FAIL-OPEN: any error, unreachable state, or not-enrolled → exit 0. Never brick editing.
 // Bypass once (loud): CC_LISTEN_BYPASS=1.
 // ---------------------------------------------------------------------------
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, realpathSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, resolve, dirname } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { configPath } from './cc-paths.mjs';
 
 const FRESH_MS = 45000;                       // cc-poll heartbeats every 20s → 45s window
 function done(code, msg) { if (msg) process.stderr.write(msg + '\n'); process.exit(code); }
+
+// Paths named by a Codex `apply_patch` envelope. Pure; exported for the test suite.
+export function patchPaths(text) {
+  const out = [];
+  const re = /^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$/gm;
+  let m;
+  while ((m = re.exec(String(text)))) out.push((m[1] || m[2]).trim());
+  return out;
+}
+// Run the gate only when executed as the hook process; an `import` (the test suite) just gets
+// patchPaths. Decided from the module path, not an env var — an env var set in a session would
+// have silently disabled the gate for that whole session. REALPATH-compared: Node realpaths the
+// main module, so a gate reached through a junction/symlink (how this estate installs things)
+// has argv[1] = the link path and import.meta.url = the target — a URL comparison silently never
+// ran the gate (reviewer, 2026-09-17; pinned by test/listen-gate.test.mjs case 7).
+const isMain = (() => { try { return !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
+if (isMain) runGate();
+
+function runGate() {
 
 try {
   let payload = {};
@@ -32,13 +52,25 @@ try {
   if (process.env.CC_LISTEN_BYPASS) done(0, '[cc-listen-gate] BYPASS active — allowed without a listen check (logged).');
 
   const tool = payload.tool_name || '';
-  if (!/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(tool)) done(0);
+  // Claude Code edits carry tool_input.file_path. Codex CLI (≥0.154) edits are `apply_patch`
+  // with NO path field — the paths live in the patch headers inside tool_input.command
+  // (`*** Update File: x` / `*** Add File: x` / `*** Delete File: x` / `*** Move to: x`).
+  if (!/^(Edit|Write|MultiEdit|NotebookEdit|apply_patch)$/.test(tool)) done(0);
 
   const ti = payload.tool_input || {};
-  const file = ti.file_path || ti.notebook_path || '';
+  // Codex patch headers are RELATIVE to the session cwd (`*** Update File: core/x.py`), so every
+  // path is resolved against payload.cwd before the estate check — a relative path can never
+  // silently fall outside an absolute estate prefix (reviewer repro 2026-09-17: exit 0, ungated).
+  const cwd = payload.cwd || process.cwd();
+  const files = (tool === 'apply_patch'
+    ? patchPaths(ti.command || ti.patch || ti.input || '')
+    : [ti.file_path || ti.notebook_path || ''].filter(Boolean)).map((f) => resolve(cwd, f));
+  const file = files[0] || '';
   const norm = (s) => String(s).replace(/\\/g, '/').toLowerCase();
   const estate = cfg.CC_ESTATE ? norm(cfg.CC_ESTATE) : '';
-  if (estate && file && !norm(file).includes(estate)) done(0);   // edit outside the estate → not gated
+  // Gated if ANY touched path is inside the estate. No path known (unparseable patch) → gated
+  // (conservative: the same as an Edit with an empty file_path was before).
+  if (estate && files.length && !files.some((f) => norm(f).includes(estate))) done(0);
 
   // identity: READ it from the session->id map that cc-join.sh / cc-name.mjs wrote, keyed by
   // session_id. This is authoritative — the gate no longer recomputes host/branch, so it always
@@ -66,12 +98,17 @@ try {
 
   // Prefer the push receiver (cc-ws) in the hint; fall back to cc-poll for older enrolments.
   const recvHint = cfg.CC_WS || cfg.CC_POLL || '<cc-ws.mjs>';
+  const isCodex = /\/codex-/.test(id);   // a Codex session has no Monitor — its receiver is the bridge
+  const here = dirname(fileURLToPath(import.meta.url));
   done(2, [
     `⛔ CHAT BUS — this session (${id}) is NOT listening; blocked before editing ${file || 'an estate file'}.`,
     `On an enrolled machine every session must be on the live bus before it edits code. Arm receive, then retry:`,
-    `  Monitor({ command: 'node ${recvHint} ${id}', description: 'crosstalk bus (${id})', persistent: true })`,
+    isCodex
+      ? `  node ${join(here, 'cc-codex-bridge.mjs')} ensure ${id} --session ${sid || '<session_id>'}   (the bridge heartbeats the beacon; check ~/.claude/.cc-listen/<sid>.bridge.log)`
+      : `  Monitor({ command: 'node ${recvHint} ${id}', description: 'crosstalk bus (${id})', persistent: true })`,
     `(The SessionStart join hook prints this exact line. One-off bypass: set CC_LISTEN_BYPASS=1.)`,
   ].join('\n'));
 } catch {
   done(0);   // fail-open: a gate that errors must never block work
+}
 }

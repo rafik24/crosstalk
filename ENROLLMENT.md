@@ -218,6 +218,24 @@ open <REPO>/src/cc-console.html                         # human web console (PO 
 - **DM a peer:** `dm-<their-shortname>` or `@<their-full-id>`.
 - Single-quote message bodies in bash — backticks are command substitution.
 
+## 8. Codex CLI sessions (≥0.154) on the same machine
+
+Codex hooks use the same protocol as Claude Code hooks, so enrolment is one file:
+
+```bash
+# 1. copy the template and point <plugin-src> at the installed plugin's src dir
+#    (plugin: ~/.claude/plugins/cache/crosstalk/crosstalk/<version>/src · checkout: ~/cross-claude-client/src)
+cp hooks/codex-hooks.json ~/.codex/hooks.json && sed -i 's#<plugin-src>#/home/you/cross-claude-client/src#g' ~/.codex/hooks.json
+# 2. start codex once, run /hooks, approve the three hooks (hash-pinned; re-approve after an update)
+```
+
+What happens then: `SessionStart` runs `codex-join.sh` (identity `host/codex-<topic>-<shortid>`,
+register, start the detached `cc-codex-bridge` for the session), the bridge pushes every message
+addressed to the session **into it as a new turn** via `codex queue --thread <session_id>`,
+`PreToolUse` on `apply_patch` runs the listen-gate, and `SessionEnd` stops the bridge. The session
+talks back with `node <src>/cc-codex.mjs send|ack|peers` (and `wait` as a bridge-less fallback).
+Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load `crosstalk` with.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

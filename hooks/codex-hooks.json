@@ -1,0 +1,41 @@
+{
+  "description": "Codex CLI (>=0.154) hooks for the Crosstalk bus. Copy into ~/.codex/hooks.json on an ENROLLED machine (machine-level, like the Claude plugin hooks) and replace <plugin-src> with the installed plugin's src dir (e.g. C:/Users/<you>/.claude/plugins/cache/crosstalk/crosstalk/<version>/src or ~/cross-claude-client/src) and <bash> with the bash to run codex-join.sh (Linux: bash; Windows: C:/Program Files/Git/bin/bash.exe — a bare `bash` may be WSL, which cannot see D:). Only `description` and `hooks` are valid top-level keys (Codex refuses the whole file otherwise). Commands are node one-liners because on Windows Codex runs hook commands through pwsh, where a leading quoted bash.exe path is a string expression rather than a command (the hook reports Failed and never runs); node spawns bash itself, which works under any launcher. Codex asks you to trust each hook ONCE via /hooks (hash-pinned; re-prompts after an edit). Same protocol as Claude Code hooks: stdin JSON with session_id, exit 2 blocks.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const r=require('child_process').spawnSync('<bash>',['<plugin-src>/codex-join.sh'],{stdio:['inherit','inherit','ignore']});process.exit(r.status||0)\"",
+            "statusMessage": "Joining the Crosstalk bus",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let sid='';try{sid=JSON.parse(s).session_id||''}catch{};if(sid)require('child_process').spawnSync(process.execPath,['<plugin-src>/cc-codex-bridge.mjs','stop','--session',sid],{stdio:'ignore'})})\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"<plugin-src>/cc-listen-gate.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
