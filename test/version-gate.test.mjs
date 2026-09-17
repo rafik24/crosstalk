@@ -54,7 +54,7 @@ const ok = (c, m) => { if (!c) { failed = true; console.error('❌', m); } else 
   const CALLERS = ['cc-ws.mjs', 'cc-poll.mjs', 'cc-send.mjs', 'cc-ack.mjs', 'cc-work.mjs',
                    'cc-name.mjs', 'cc-bus.mjs', 'cc-console.html', 'cc-join.sh'];
   for (const f of CALLERS) {
-    const src = readFileSync(join(ROOT, f), 'utf8');
+    const src = readFileSync(join(ROOT, 'src', f), 'utf8');
     ok(/x-cc-version/i.test(src), `${f} sends its version (x-cc-version) on bus requests`);
   }
 }

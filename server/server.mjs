@@ -27,7 +27,7 @@ import { createDB } from './db.mjs';
 import { createRestRouter } from './rest-api.mjs';
 import { attachWsHub, originAllowed } from './ws-hub.mjs';
 import { versionGateMiddleware } from './version-gate.mjs';
-import { codeRev, pkgVersion } from '../cc-rev.mjs';
+import { codeRev, pkgVersion } from '../src/cc-rev.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -253,7 +253,7 @@ export async function startServer(opts = {}) {
   });
 
   app.get('/console', (_req, res, next) => {
-    res.sendFile(path.join(REPO_ROOT, 'cc-console.html'), (err) => {
+    res.sendFile(path.join(REPO_ROOT, 'src', 'cc-console.html'), (err) => {
       if (err) next(err);
     });
   });

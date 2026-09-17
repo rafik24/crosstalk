@@ -2,7 +2,7 @@
 name: crosstalk-reviewer
 description: >
   Read-only correctness + security reviewer for the Crosstalk coordination bus.
-  MUST be run before any change to server/**, cc-*.mjs, ws-hub, or the tests is
+  MUST be run before any change to server/**, src/** (the cc-* client scripts), ws-hub, or the tests is
   merged. Knows this repo's real attack surface — bearer + admin-scope auth,
   SQL-injection, the atomic work-item claim-lock, the hand-rolled WebSocket
   upgrade, leader election / failover / DB replication integrity, input bounds

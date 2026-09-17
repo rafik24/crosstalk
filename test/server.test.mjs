@@ -21,7 +21,7 @@ import http from 'node:http';
 import express from 'express';
 
 import { startServer } from '../server/server.mjs';
-import { pkgVersion } from '../cc-rev.mjs';   // WS upgrades must carry &v= (the fleet version gate)
+import { pkgVersion } from '../src/cc-rev.mjs';   // WS upgrades must carry &v= (the fleet version gate)
 
 // This suite exercises auth / origin / wiring, NOT the fleet version gate (test/version-gate.test.mjs
 // owns that). Bypass the gate here so the many REST calls that don't carry x-cc-version aren't 426'd.

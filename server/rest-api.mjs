@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { WORK_STATES, WORK_KINDS, normalizeChannelName } from './db.mjs';
-import { canonicalShort } from '../cc-render.mjs';
+import { canonicalShort } from '../src/cc-render.mjs';
 
 // Canonicalize an identity's short name server-side (#5): whatever a client registers, the
 // stored/advertised `host/<short>` has its short normalized the SAME way a dm-<short> channel is,

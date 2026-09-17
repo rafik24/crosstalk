@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { whoami, resolveFull, resolveFast, cacheLeader, outranks } from '../cc-discover.mjs';
-import { pkgVersion } from '../cc-rev.mjs';   // x-cc-version — the /api plane is version-gated
+import { whoami, resolveFull, resolveFast, cacheLeader, outranks } from '../src/cc-discover.mjs';
+import { pkgVersion } from '../src/cc-rev.mjs';   // x-cc-version — the /api plane is version-gated
 import { createServer as createNetServer } from 'node:net';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/cc-join.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/src/cc-join.sh\"",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/cc-listen-gate.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/cc-listen-gate.mjs\"",
             "timeout": 10
           }
         ]
