@@ -14,10 +14,11 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { whoami } from '../src/cc-discover.mjs';
 import { pkgVersion } from '../src/cc-rev.mjs';
+import { pidAlive, waitForExit } from '../src/cc-codex-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(__dirname, '..', 'server', 'server.mjs');
@@ -187,6 +188,67 @@ try {
     await sleep(600);
     ok(!/OFFSCOPE_J/.test(scoped.out), 'J2: an @mention on another channel is NOT emitted to a --channel receiver');
     try { all.kill(); scoped.kill(); } catch {}
+  }
+
+  // K: #26 — the codex-queue sink is SERIALIZED. cc-receive's deliver() fires emit() per message as
+  //    it arrives; `codex queue` is a subprocess, so a burst (a reconnect backfill replaying a gap,
+  //    or rapid DMs) would spawn N at once — unordered into the Codex thread + a process spike. The
+  //    emit chain runs at most one at a time, FIFO. The SLOW shim logs an ENTER on start and its
+  //    normal line on finish; serialized ⇒ in-flight never exceeds 1 and dones come in send order.
+  //    Watch-fail: revert the emit chain in cc-codex-bridge.mjs and maxInFlight jumps to N.
+  {
+    const N = 4;
+    for (let i = 1; i <= N; i++) await send('dm-codex-lane-aaaaaaaa', `SLOW_${i} burst message`);
+    ok(await until(() => queued('SLOW_').length >= N, 10000), `K: all ${N} SLOW messages queued`);
+    const events = calls().filter((c) => (c.enter && /SLOW_/.test(c.msg || '')) || (Array.isArray(c.argv) && c.argv.join(' ').includes('SLOW_')));
+    let inFlight = 0, maxInFlight = 0; const doneOrder = [];
+    for (const e of events) {
+      if (e.enter) { inFlight++; if (inFlight > maxInFlight) maxInFlight = inFlight; }
+      else { inFlight--; const m = (e.argv[e.argv.indexOf('--message') + 1] || '').match(/SLOW_(\d)/); if (m) doneOrder.push(Number(m[1])); }
+    }
+    ok(maxInFlight === 1, `K: at most one codex queue in flight at a time (max=${maxInFlight}) — serialized (#26)`);
+    ok(doneOrder.join(',') === Array.from({ length: N }, (_, i) => i + 1).join(','), `K: delivered FIFO in send order (got ${doneOrder.join(',')})`);
+  }
+
+  // L: #27 — the stale-beacon REPLACE path AWAITS the old bridge's death before spawning, so the old
+  //    bridge's still-live WebSocket cannot double-queue a DM in the SIGTERM window. Start a bridge,
+  //    age its beacon + pid file so `ensure` treats it as stale-but-live, ensure again, and assert it
+  //    reports the old pid exited FIRST (it waited) and that a distinct new bridge now owns the pid.
+  //    Watch-fail: drop the await in ensure() and the message reverts to a bare "replaced".
+  {
+    const SID3 = 'dddddddd-1111-4222-8333-444444444444';
+    const ID3 = 'testbox/codex-lane-dddddddd';
+    const pf3 = join(HOME, '.claude', '.cc-listen', `${SID3}.bridge.pid`);
+    const beacon3 = join(HOME, '.claude', '.cc-listen', ID3.replace(/[^A-Za-z0-9._-]/g, '_'));
+    const e1 = spawnSync(process.execPath, [BRIDGE, 'ensure', ID3, '--session', SID3, '--base', BASE, '--token', TOKEN], { env, encoding: 'utf8' });
+    ok(/bridge started/.test(e1.stdout), 'L: first bridge for the replace test started');
+    ok(await until(() => existsSync(pf3), 5000), 'L: first pid file written');
+    const oldPid = Number(readFileSync(pf3, 'utf8'));
+    ok(await until(() => pidAlive(oldPid), 3000), 'L: first bridge is alive');
+    // Wait until the bridge has actually WRITTEN its beacon (it does so a moment after the pid is
+    // live); aging it before that races the bridge, which then re-writes it fresh. The next heartbeat
+    // is 20s away, so once it is listening the aged mtimes hold for the fast second ensure.
+    const blog3 = join(HOME, '.claude', '.cc-listen', `${SID3}.bridge.log`);
+    ok(await until(() => existsSync(beacon3) && existsSync(blog3) && /listening as/.test(readFileSync(blog3, 'utf8')), 15000), 'L: first bridge listening (beacon written)');
+    // Age BOTH freshness signals so ensure sees "live pid + stale beacon" (the replace path).
+    const past = new Date(Date.now() - 5 * 60000);
+    try { utimesSync(beacon3, past, past); } catch {}
+    try { utimesSync(pf3, past, past); } catch {}
+    const e2 = spawnSync(process.execPath, [BRIDGE, 'ensure', ID3, '--session', SID3, '--base', BASE, '--token', TOKEN], { env, encoding: 'utf8' });
+    ok(/exited first/.test(e2.stdout), 'L: replace AWAITED the old bridge death (exited first): ' + e2.stdout.trim());
+    const newPid = Number(readFileSync(pf3, 'utf8'));
+    ok(newPid && newPid !== oldPid, `L: a distinct new bridge replaced the old (old=${oldPid} new=${newPid})`);
+    ok(await until(() => !pidAlive(oldPid), 3000), 'L: the old bridge is gone');
+    spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID3], { env, encoding: 'utf8' });
+  }
+
+  // M: #27 unit — waitForExit polls a pid until it dies (→true) or the timeout elapses (→false),
+  //    bounded so a wedged process never blocks the caller.
+  {
+    const d = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+    ok((await waitForExit(d.pid, 500)) === false, 'M: waitForExit → false while the pid is alive (bounded timeout)');
+    d.kill();
+    ok((await waitForExit(d.pid, 3000)) === true, 'M: waitForExit → true once the pid exits');
   }
 
   // D: stop
