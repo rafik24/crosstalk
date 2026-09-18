@@ -341,6 +341,12 @@ once), a poison message (parked after the cap, neighbours delivered exactly once
 Codex parent (bridge exits); `test/ws.test.mjs` (unchanged) is the regression that `cc-ws` still
 behaves byte-for-byte.
 
+The Codex sink is **serialized** (#26). cc-receive fires `emit()` per message as it arrives, so the
+bridge chains its `codex queue` calls — at most one in flight, FIFO, exactly like `cc-ws`'s
+`emitChain` — instead of spawning N at once when a burst arrives (a reconnect backfill replaying a
+gap, or rapid DMs). That keeps ordering into the Codex thread and stops a backlog from spiking node +
+codex processes (`test/codex-bridge.test.mjs` §K asserts at most one queue in flight and FIFO order).
+
 Codex pieces:
 - **`src/codex-join.sh`** — Codex `SessionStart` hook (Codex hooks speak the Claude hook protocol:
   same stdin `session_id`, exit 2 blocks). Mints `host/codex-<topic>-<shortid>`, writes the same
@@ -351,7 +357,10 @@ Codex pieces:
   image and ties the bridge to that pid (exits on two consecutive misses); if none is found the
   lifetime is `SessionEnd → stop` only, and `ensure` prints which. Resolved in node, not bash,
   because under Git Bash `$PPID`/`$$` are MSYS pids. Verified live on Windows under a real
-  `codex exec`. A live bridge whose beacon has gone stale (sleep/resume) is replaced, not doubled.
+  `codex exec`. A live bridge whose beacon has gone stale (sleep/resume) is replaced, not doubled —
+  and the replace **awaits the old bridge's exit** (bounded by `CC_REPLACE_WAIT_MS`, default 3 s)
+  before spawning, so its still-live WebSocket can't double-queue a DM that lands in the SIGTERM
+  window (#27; `test/codex-bridge.test.mjs` §L, plus §M for the `waitForExit` unit).
 - **`src/cc-codex.mjs join|send|ack|wait|peers`** — the session's own client. `wait` is the bounded
   fallback receive when no bridge runs; outcomes are **stdout text** (`CHAT …` / `WAIT_TIMEOUT:`),
   exit 0 — an agent's terminal wrapper mangled a non-zero timeout code in the POC.

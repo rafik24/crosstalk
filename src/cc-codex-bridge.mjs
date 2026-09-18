@@ -39,12 +39,21 @@ import { createReceiver, LIVE_DIR, beaconPath } from './cc-receive.mjs';
 
 const PARENT_CHECK_MS = Number(process.env.CC_PARENT_CHECK_MS || 20000);
 const QUEUE_TIMEOUT_MS = Number(process.env.CC_QUEUE_TIMEOUT_MS || 30000);
+const REPLACE_WAIT_MS = Number(process.env.CC_REPLACE_WAIT_MS || 3000);   // #27: bounded wait for a stale bridge to die before replacing it
 // The exact CLI image only: `codex` / `codex.exe`. A substring match also hit the helper images
 // present on a dev box (codex-code-mode-host.exe, codex-computer-use-swift.exe) — if one of those
 // ever ran the hook, the bridge would follow the helper's lifetime (reviewer, 2026-09-17).
 const CODEX_IMAGE = /^codex(\.exe)?$/i;
 
 export function pidAlive(pid) { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+// #27: poll a pid until it exits or the timeout elapses. Returns true iff it is gone. Cross-platform
+// (process.kill(pid,0) is the liveness probe pidAlive already uses); bounded so a wedged process can
+// never block the caller forever. Exported for the unit test.
+export async function waitForExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (pidAlive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  return !pidAlive(pid);
+}
 function fresh(file, ms) { try { return (Date.now() - statSync(file).mtimeMs) < ms; } catch { return false; } }
 
 // --- find the codex process above us -------------------------------------------------------
@@ -143,9 +152,22 @@ function main() {
     const cfg = loadConfig();
     const ONLY = opt('--channel', null);
     try { mkdirSync(LIVE_DIR, { recursive: true }); writeFileSync(pidFile, String(process.pid)); } catch {}
+    // #26: serialize the codex-queue sink. cc-receive's deliver() fires emit() per message as it
+    // arrives; for the stdout sink (cc-ws) that is instant + ordered, but `codex queue` is a
+    // subprocess, so a burst — a reconnect backfill replaying a gap, or rapid DMs — would spawn N at
+    // once: unordered into the Codex thread and a process spike. Chain them FIFO, at most one in
+    // flight, exactly like cc-ws.mjs's emitChain. The engine's retry queue needs THIS message's real
+    // outcome, so the caller gets the true promise while the chain tail swallows failures (a failed
+    // emit must not stall the order for the next message — the retry queue re-drives the failed one).
+    let emitTail = Promise.resolve();
+    const emit = (rendered) => {
+      const running = emitTail.then(() => queueIntoCodex(SID, rendered), () => queueIntoCodex(SID, rendered));
+      emitTail = running.catch(() => {});
+      return running;
+    };
     const rx = createReceiver({
       instance,
-      emit: (rendered) => queueIntoCodex(SID, rendered),
+      emit,
       pin: opt('--base', process.env.CC_BASE) || cfg.pin,
       token: opt('--token', process.env.CC_TOKEN) || cfg.token,
       only: ONLY,
@@ -168,7 +190,7 @@ function main() {
     await rx.start();
   }
 
-  function ensure() {
+  async function ensure() {
     const instance = args[1];
     if (!instance || instance.startsWith('--')) usage();
     // "Already running" needs BOTH a live pid AND a recent sign of life (a fresh beacon, or a pid
@@ -179,7 +201,14 @@ function main() {
     if (live && pidAlive(live)) {
       if (fresh(beaconPath(instance), 60000) || fresh(pidFile, 30000)) { console.log(`bridge already running for session ${SID} (pid ${live})`); return; }
       try { process.kill(live, 'SIGTERM'); } catch {}
-      console.log(`bridge pid ${live} alive but its beacon is stale — replaced`);
+      // #27: AWAIT the old bridge's death before spawning the replacement. Between the SIGTERM and the
+      // old bridge actually closing its WebSocket, a push can still land and be queued — so without
+      // this wait a DM that arrives in that window is DOUBLE-queued (old bridge + new bridge). Bounded:
+      // replace anyway on timeout, because a wedged bridge must never block the respawn forever.
+      const gone = await waitForExit(live, REPLACE_WAIT_MS);
+      console.log(gone
+        ? `bridge pid ${live} alive but its beacon is stale — replaced (old pid ${live} exited first)`
+        : `bridge pid ${live} alive but its beacon is stale — SIGTERM sent but pid ${live} still up after ${REPLACE_WAIT_MS}ms; replacing anyway`);
     }
     // --parent: explicit pid, `none` to disable, or (default) resolve the codex above us.
     let parent = opt('--parent', null), seen = '';
@@ -206,7 +235,7 @@ function main() {
   }
 
   if (cmd === 'run') run().catch((e) => { console.error('bridge error:', e.message); process.exit(1); });
-  else if (cmd === 'ensure') ensure();
+  else if (cmd === 'ensure') ensure().catch((e) => { console.error('ensure error:', e && e.message ? e.message : e); process.exit(1); });
   else if (cmd === 'stop') stop();
   else usage();
 }
