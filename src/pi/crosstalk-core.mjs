@@ -28,6 +28,7 @@ import os from 'node:os';
 import { createReceiver as realCreateReceiver } from '../cc-receive.mjs';
 import { createClient as realCreateClient, normChannel } from '../cc-client.mjs';
 import { canonicalShort } from '../cc-render.mjs';
+import { loadConfig } from '../cc-discover.mjs';
 
 // Instance-id charset matches beaconPath()'s sanitizer: [A-Za-z0-9._-].
 const sanitizeHost = (h) => String(h || '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '') || 'host';
@@ -51,8 +52,16 @@ export function installCrosstalk(pi, options = {}) {
     host = os.hostname(),
   } = options;
 
-  const pin = options.pin ?? env.CC_BASE ?? null;
-  const token = options.token ?? env.CC_TOKEN ?? '';
+  // Resolve pin+token HERE, including the ~/.claude/.crosstalk config, and pass the resolved values
+  // down. The receiver (cc-receive.mjs) has no config fallback of its own — it takes whatever token
+  // it is handed — so if we don't read the config the receiver auths with an empty token and never
+  // registers. And an empty-string default (`?? ''`) is NOT nullish, so it would clobber cc-client's
+  // own `?? cfg.token` fallback too — the bug pi hit on the first live install (2026-09-17): the
+  // extension loaded and `bus_peers` ran, but returned "no CC_TOKEN" because '' shadowed the config.
+  // Order matches the rest of the fleet: explicit option → env → config file.
+  const cfg = loadConfig();
+  const pin = options.pin ?? env.CC_BASE ?? cfg.pin ?? null;
+  const token = options.token ?? env.CC_TOKEN ?? cfg.token ?? '';
   const client = createClient({ pin, token });
 
   let rx = null;

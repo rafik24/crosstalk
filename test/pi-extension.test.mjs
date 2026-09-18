@@ -14,7 +14,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -154,6 +154,32 @@ try {
   await send(DM, 'DM_AFTER_SHUTDOWN should not arrive');
   await sleep(1500);
   ok(pi.sent.length === afterShutdown, 'S: no delivery after shutdown (receiver stopped)');
+
+  // ---- R: token/pin resolved from the config file when NOT passed explicitly ----
+  // Regression for the first live install (2026-09-17): the extension loaded and `bus_peers` ran,
+  // but returned "no CC_TOKEN" because the core defaulted token to '' and passed it down, shadowing
+  // both cc-client's `?? cfg.token` and the receiver (which has no config fallback at all). Here NO
+  // token/pin is passed — they must come from ~/.claude/.crosstalk (via CC_BUS_CONFIG) — and the
+  // session must still join and send. Would fail against the pre-fix core.
+  {
+    const cfgFile = join(mkdtempSync(join(tmpdir(), 'ccpi-cfg-')), 'crosstalk');
+    writeFileSync(cfgFile, `CC_TOKEN=${TOKEN}\nCC_BASE=${BASE}\n`);
+    const savedCfg = process.env.CC_BUS_CONFIG;
+    process.env.CC_BUS_CONFIG = cfgFile;
+    try {
+      const piR = makeFakePi();
+      const ctxR = makeCtx('cfff0000-1111-4222-8333-444444444444');
+      const CFGID = 'testbox/pi-fromcfg';
+      const extR = installCrosstalk(piR, { Type, env: { CC_INSTANCE: CFGID }, host: 'testbox', log: () => {} });  // NO pin, NO token
+      await piR.fire('session_start', { reason: 'startup' }, ctxR);
+      ok(await until(() => extR.active, 5000), 'R: joins with token+base taken from the config file (no explicit token)');
+      const rr = await piR.tools.bus_send.execute('r1', { channel: `dm-${shortIdOf(CFGID)}-x`, text: 'cfg token works', type: 'response' });
+      ok(/id=\d+/.test(rr.content[0].text), 'R: bus_send authenticates with the config-file token (no "no CC_TOKEN")');
+      await piR.fire('session_shutdown', { reason: 'quit' }, ctxR);
+    } finally {
+      if (savedCfg === undefined) delete process.env.CC_BUS_CONFIG; else process.env.CC_BUS_CONFIG = savedCfg;
+    }
+  }
 
   // ---- V: version-gate wiring, with an INJECTED fake receiver (no live 426 needed) ----
   // The engine fires onVersionGate SYNCHRONOUSLY inside start() on a 426, then start() resolves
