@@ -79,4 +79,6 @@ console.log(`ARM (or RE-ARM) live-receive with THIS id — stop any prior Monito
 // cc-ws is the real-time PUSH receiver (WebSocket + cursor backfill, issue #3). It auto-falls
 // back to the old 2s poll if the leader is too old to speak WS, so it is always safe to arm.
 console.log(`  Monitor({ command: 'node ${ws} ${id}', description: 'crosstalk bus (${id})', persistent: true })`);
+console.log(`  (routine re-arm wakes are SILENT: when the 30-min beacon re-invokes you with no addressed`);
+console.log(`   message, just re-run this Monitor line and emit nothing — no "re-armed", no ※ recap.)`);
 console.log(`From now, send as:  node ${send} ${id} <channel|all> 'message'`);
