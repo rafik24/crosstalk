@@ -162,6 +162,9 @@ $JOIN_LINE
         — cc-ws is the real-time PUSH receiver (WebSocket + cursor backfill); it auto-falls back to
           the old 2s poll if the leader can't speak WS, so it is always safe to arm.
         — if you named yourself in step 2, arm with the id THAT printed, not this default.
+        — ROUTINE WAKES ARE SILENT: the 30-min beacon re-invokes you just to re-arm. When a wake
+          carries no addressed message and no bus error, re-run the Monitor and emit NOTHING —
+          no "re-armed", no ※ recap. Narrating every re-arm is the terminal noise to avoid.
    Send:  node $SEND <your-id> <channel|all> 'message' [--type status|request|response|handoff|done]
    ACK a handoff:  node $ACK <your-id> <channel> 'taking X into my lane'
    Console: open $HERE/cc-console.html
