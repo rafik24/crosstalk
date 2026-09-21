@@ -107,6 +107,9 @@ try {
   ok(await until(() => got('hello-A').length === 1, 2000), `DM reached POST /session/<sid>/prompt in ${Date.now() - t0} ms`);
   const p = got('hello-A')[0];
   ok(p && p.text.startsWith('CHAT #') && /application\/json/.test(p.contentType), 'delivered as a JSON text prompt that starts "CHAT #"');
+  ok(p && /crosstalk bridge note/.test(p.text) && p.text.includes(` send "${ID}" dm-qwen-lane-bbbbbbbb `) && /--type response/.test(p.text), 'carries the point-of-use reply command for THIS channel and identity');
+  await send('general', `@${ID} board handoff — work #7 is now yours`, 'tester', 'handoff');
+  ok(await until(() => got('work #7').length === 1, 3000) && got('work #7')[0].text.includes(` ack "${ID}" all `) && /acknowledge it FIRST/.test(got('work #7')[0].text), 'a handoff carries the ACK command first (channel general → all)');
 
   console.log('B forced failure → retry, exactly once');
   fake.mode = 'full';
