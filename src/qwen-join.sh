@@ -103,7 +103,12 @@ esac
 # hook's stdio (see the header: qwen serve's ~10 s session-init deadline; the 3.3.3 one-shot clients
 # linger ~9 s after finishing). Order matters: snapshot first, then the bridge.
 BRIDGE_LINE="not started (no session id in the hook payload)"
-if [ -n "$SID" ]; then
+# Fail-closed profile check in the FOREGROUND (no network, fast): bus text must never be pushed into a
+# Qwen profile without an enforceable tool boundary. `ensure` repeats it; this is so the session is TOLD.
+PROFILE="$(node "$BRIDGE" check 2>/dev/null || true)"
+if [ -n "$SID" ] && [ "${PROFILE#profile ok}" = "$PROFILE" ]; then
+  BRIDGE_LINE="NOT started — ${PROFILE:-profile check failed}. Fix ~/.qwen/settings.json (see hooks/qwen-hooks.json), then start a new session."
+elif [ -n "$SID" ]; then
   ( [ -z "$NO_LEADER" ] && CC_DESC="qwen: $topic @ $machine" node "$CLIENT" join "$ID" "qwen: $topic @ $machine"
     CC_DESC="qwen: $topic @ $machine" node "$BRIDGE" ensure "$ID" --session "$SID" ) </dev/null >/dev/null 2>&1 &
   disown 2>/dev/null || true

@@ -99,12 +99,15 @@ try {
 
   // Prefer the push receiver (cc-ws) in the hint; fall back to cc-poll for older enrolments.
   const recvHint = cfg.CC_WS || cfg.CC_POLL || '<cc-ws.mjs>';
-  const isCodex = /\/codex-/.test(id);   // a Codex session has no Monitor — its receiver is the bridge
+  const isCodex = /\/codex-/.test(id);
+  const isQwen = /\/qwen-/.test(id);     // a Qwen session has no Monitor either — bridge (serve) or `wait` (TUI)   // a Codex session has no Monitor — its receiver is the bridge
   const here = dirname(fileURLToPath(import.meta.url));
   done(2, [
     `⛔ CHAT BUS — this session (${id}) is NOT listening; blocked before editing ${file || 'an estate file'}.`,
     `On an enrolled machine every session must be on the live bus before it edits code. Arm receive, then retry:`,
-    isCodex
+    isQwen
+      ? `  node ${join(here, 'cc-qwen-bridge.mjs')} ensure ${id} --session ${sid || '<session_id>'}   (needs a \`qwen serve\` session; log ~/.claude/.cc-listen/<sid>.bridge.log)\n  In a plain TUI / one-shot Qwen session there is no serve session to push into — receive with:  node ${join(here, 'cc-codex.mjs')} wait ${id} --timeout 90   (it heartbeats the beacon while it waits)`
+      : isCodex
       ? `  node ${join(here, 'cc-codex-bridge.mjs')} ensure ${id} --session ${sid || '<session_id>'}   (the bridge heartbeats the beacon; check ~/.claude/.cc-listen/<sid>.bridge.log)`
       : `  Monitor({ command: 'node ${recvHint} ${id}', description: 'crosstalk bus (${id})', persistent: true })`,
     `(The SessionStart join hook prints this exact line. One-off bypass: set CC_LISTEN_BYPASS=1.)`,

@@ -24,6 +24,8 @@
 //   node cc-qwen-bridge.mjs run    <instance_id> --session <sid> [--serve URL] [--base URL] [--token TOK] [--channel ch] [--all] [--from-start]
 //   node cc-qwen-bridge.mjs ensure <instance_id> --session <sid> [--serve URL]     # idempotent detached spawn
 //   node cc-qwen-bridge.mjs stop   --session <sid>
+//   node cc-qwen-bridge.mjs check                                                  # exit 0 / 3: is this Qwen profile safe to feed bus text? (no network)
+// `ensure` runs the same check and FAILS CLOSED (exit 3, nothing spawned).
 //   env: QWEN_SERVE_URL (default http://127.0.0.1:4170), QWEN_SERVER_TOKEN (bearer, when the daemon
 //        runs with --require-auth or off-loopback), CC_SESSION_CHECK_MS, CC_DAEMON_GRACE_MS, CC_QUEUE_TIMEOUT_MS
 //
@@ -33,6 +35,7 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './cc-discover.mjs';
 import { createReceiver, LIVE_DIR, beaconPath } from './cc-receive.mjs';
@@ -71,6 +74,31 @@ export async function queueIntoQwen(target, sid, line) {
   throw new Error(`qwen serve prompt → HTTP ${r.status}${detail ? ': ' + detail : ''}`);   // 503 prompt_queue_full → engine retries with backoff
 }
 
+// --- fail-closed lane profile check (reviewer blocker B1) ------------------------------------------
+// The bridge turns UNTRUSTED bus text into user turns of an agent that can run tools, so it refuses
+// to start unless the Qwen profile it will feed has an enforceable boundary:
+//   - no blanket tool approval: permissions.allow must not contain "*" or an unscoped shell rule, and
+//     no approvalMode may be "yolo";
+//   - the deterministic shell gate (cc-qwen-shell-gate.mjs) is wired as a PreToolUse hook.
+// Read-only. Checked files: $QWEN_HOME/settings.json (default ~/.qwen) and <cwd>/.qwen/settings.json
+// (a project file can widen permissions). Unreadable/missing user settings = a problem (no gate wired).
+// Operator override, loud: CC_QWEN_UNSAFE_PROFILE=1.
+const UNSCOPED = /^(\*|(bash|shell|shelltool|run_shell_command)(\(\s*\*?\s*\))?)$/i;
+export function laneProfileProblems({ qwenHome = process.env.QWEN_HOME || join(homedir(), '.qwen'), cwd = process.cwd() } = {}) {
+  const problems = []; let gateWired = false; let userRead = false;
+  const files = [[join(qwenHome, 'settings.json'), true], [join(cwd, '.qwen', 'settings.json'), false]];
+  for (const [file, isUser] of files) {
+    let j; try { j = JSON.parse(readFileSync(file, 'utf8')); } catch (e) { if (isUser) problems.push(`cannot read ${file} (${e.code || 'invalid JSON'})`); continue; }
+    if (isUser) userRead = true;
+    for (const rule of [].concat(j?.permissions?.allow || [], j?.tools?.allowed || [])) if (UNSCOPED.test(String(rule).trim())) problems.push(`${file}: blanket approval ${JSON.stringify(rule)} in the allow list`);
+    const walk = (o, path) => { if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { if (/approval.?mode/i.test(k) && /^yolo$/i.test(String(v))) problems.push(`${file}: ${path}${k} = "yolo"`); walk(v, path + k + '.'); } };
+    walk(j, '');
+    for (const grp of [].concat(j?.hooks?.PreToolUse || [])) for (const h of [].concat(grp?.hooks || [])) if (/cc-qwen-shell-gate\.mjs/.test(String(h?.command || ''))) gateWired = true;
+  }
+  if (userRead && !gateWired) problems.push('the shell gate (cc-qwen-shell-gate.mjs) is not wired as a PreToolUse hook — see hooks/qwen-hooks.json');
+  return problems;
+}
+
 // --- point-of-use instructions ----------------------------------------------------------------
 // Measured (QA #42 A5, four-class interop): with the etiquette only in the SessionStart context, Qwen
 // (even with thinking on) answered a request in its own session text and started WORKING on a handoff
@@ -103,6 +131,7 @@ function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
   const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
+  if (cmd === 'check') { const ok = (() => { const pr = laneProfileProblems(); if (pr.length) console.log('⛔ unsafe Qwen profile: ' + pr.join('; ')); else console.log('profile ok'); return !pr.length; })(); process.exit(ok ? 0 : 3); }
   const SID = String(opt('--session', '')).replace(/[^A-Za-z0-9._-]/g, '_');
   const usage = () => { console.error('usage: cc-qwen-bridge.mjs run|ensure <instance_id> --session <sid> [--serve URL] | stop --session <sid>'); process.exit(2); };
   if (!cmd || !SID) usage();
@@ -151,9 +180,18 @@ function main() {
     await rx.start();
   }
 
+  function profileGate() {
+    const problems = laneProfileProblems();
+    if (!problems.length) return true;
+    if (process.env.CC_QWEN_UNSAFE_PROFILE === '1') { console.log(`⚠️ UNSAFE Qwen profile accepted by CC_QWEN_UNSAFE_PROFILE=1: ${problems.join('; ')}`); return true; }
+    console.log(`⛔ bridge NOT started — this Qwen profile has no enforceable tool boundary for bus text: ${problems.join('; ')}`);
+    return false;
+  }
+
   async function ensure() {
     const instance = args[1];
     if (!instance || instance.startsWith('--')) usage();
+    if (!profileGate()) process.exit(3);
     serveTarget(opt('--serve', process.env.QWEN_SERVE_URL), process.env.QWEN_SERVER_TOKEN);   // fail fast on a bad target
     const live = readPid();
     if (live && pidAlive(live)) {
