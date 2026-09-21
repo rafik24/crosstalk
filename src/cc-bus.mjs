@@ -65,6 +65,9 @@ const HEARTBEAT_MS = 10000;        // supervisor rewrites its heartbeat this oft
 const SUPERVISOR_STALE_MS = 30000; // a heartbeat older than this (3 missed beats) ⇒ presumed dead
 const SPAWN_LOCK_STALE_MS = 15000; // an abandoned spawn lock older than this is cleared
 const SUPERVISOR_PREFIX = 'cc-bus-supervisor/';   // presence-id prefix for coverage visibility
+const CLIENT_TICK_MAX_MS = 15000;   // a client's failover-check tick; shorter when CC_REPLICATE_MS is (issue 43)
+const STEPDOWN_HOLDOFF_MS = CLIENT_TICK_MAX_MS + 10000;   // an ex-leader may JOIN but not ELECT for this long
+const DRAIN_FOLLOW_MAX_MS = 30000;  // > the server's drain deadline (20s): never follow a drain forever
 
 // Is `pid` a live process? signal 0 tests existence cross-platform: it throws ESRCH when the
 // process is gone and EPERM when it exists but we can't signal it (still alive → true).
@@ -200,25 +203,30 @@ async function waitFor(base, predicate, timeoutMs = 20000, everyMs = 400) {
 // the leader's epoch so the failover-promote is authoritative (epoch+1 > the leader's). A
 // client runs no server, so DB_FILE is not open here; we clear stale WAL/SHM and swap the fresh
 // image in atomically. Best-effort: any failure returns false and never disturbs the client.
-async function replicateSnapshot(leader, token) {
+async function replicateSnapshot(leader, token) { return (await pullSnapshot(leader, token)).ok; }
+// → { ok, draining }: `draining` = the leader answered with x-cc-draining (it is in a drain
+// stepdown — read-only and leaving as soon as a replica holds the final snapshot; issue 43).
+async function pullSnapshot(leader, token) {
+  const miss = { ok: false, draining: false };
   try {
     // Issue #35: NEVER replicate when the leader is this very host — the pull would target the
     // same DATA_DIR the live leader has open. The old guard matched only a loopback-resolved
     // base URL (defeated by CC_BIND=0.0.0.0, where discovery returns the LAN address) and a
     // case-sensitive host compare (defeated by OS-vs-config casing, issue #39). Canonical host
     // equality catches both. A same-host client still watches for failover; it just never pulls.
-    if (canonicalShort(String(leader.host || '')) === HOST) return false;
+    if (canonicalShort(String(leader.host || '')) === HOST) return miss;
     const r = await fetch(leader.base + '/cc/export', { headers: { Authorization: adminBearer(token) } });
-    if (!r.ok) return false;
+    if (!r.ok) return miss;
+    const draining = r.headers.get('x-cc-draining') === '1';
     const buf = Buffer.from(await r.arrayBuffer());
-    if (!buf.length) return false;
+    if (!buf.length) return miss;
     mkdirSync(DATA_DIR, { recursive: true });
     const tmp = REPLICA_FILE + '.tmp';
     writeFileSync(tmp, buf);
     renameSync(tmp, REPLICA_FILE);   // atomic on both POSIX and Windows; live DB untouched (#35)
     if (typeof leader.epoch === 'number') writeEpoch(leader.epoch);
-    return true;
-  } catch { return false; }
+    return { ok: true, draining };
+  } catch { return miss; }
 }
 
 // Adopt the replicated snapshot as the working DB at PROMOTION time — the only moment we know no
@@ -320,7 +328,8 @@ async function cmdStart() {
     role = 'leader';
     log(`no bus present → becoming LEADER at epoch ${epoch} (port ${port})`);
     child = spawnLeader(epoch, port, token);
-    stopBeacon = startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort });
+    // CC_DISCOVERY=peers: a confined bus neither scans nor ADVERTISES itself on the LAN.
+    stopBeacon = cfg.discovery === 'peers' ? null : startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort });
 
     child.on('exit', (code) => {
       if (stopBeacon) { stopBeacon(); stopBeacon = null; }
@@ -330,7 +339,7 @@ async function cmdStart() {
       // the old leader would re-take the term at an epoch TIE with the freshly-migrated host.
       const wasStepdown = steppingDown || existsSync(STEPDOWN_MARKER);
       try { if (existsSync(STEPDOWN_MARKER)) rmSync(STEPDOWN_MARKER); } catch {}
-      if (wasStepdown) { log('stepped down → switching to CLIENT'); steppingDown = false; role = null; runClient(); return; }
+      if (wasStepdown) { log('stepped down → switching to CLIENT'); steppingDown = false; role = null; runClient({ holdoffMs: STEPDOWN_HOLDOFF_MS }); return; }
       log(`server exited (code ${code}) → re-electing in 1s`);
       role = null;
       setTimeout(electAndRun, 1000);
@@ -374,33 +383,66 @@ async function cmdStart() {
     }, 5000);
   }
 
-  async function runClient() {
+  // Tick + pull cadence (issue 43). Failover detection and the replica pull share ONE loop, which
+  // used to be a fixed 15s interval — so CC_REPLICATE_MS below 15s was silently ignored while the
+  // log claimed it as the loss bound. The tick now follows a shorter configured interval (floor
+  // 1s); at the default (30s pull) it stays 15s, i.e. unconfigured estates behave as before.
+  async function runClient({ holdoffMs = 0 } = {}) {
     role = 'client';
-    const REPLICATE_MS = parseInt(process.env.CC_REPLICATE_MS) || 30000;
-    log(`CLIENT mode — a bus is present; not starting a server. Watching for failover + replicating the DB every ${Math.round(REPLICATE_MS / 1000)}s.`);
+    const REPLICATE_MS = Math.max(1000, parseInt(process.env.CC_REPLICATE_MS) || 30000);
+    const TICK_MS = Math.min(CLIENT_TICK_MAX_MS, REPLICATE_MS);
+    // A node that just STEPPED DOWN must not win the term straight back: for one tick (+ margin)
+    // it may join a new leader but not start an election, so the replicas get to promote first.
+    const holdoffUntil = holdoffMs ? Date.now() + holdoffMs : 0;
+    log(`CLIENT mode — a bus is present; not starting a server. Failover check every ${TICK_MS / 1000}s, DB pull every ${Math.max(TICK_MS, REPLICATE_MS) / 1000}s (unclean-failover loss bound ≈ pull interval + one tick).`);
     let lastReplicate = 0;      // when we last ATTEMPTED a pull (throttle)
     let lastReplicateOk = 0;    // when we last SUCCEEDED (snapshot recency)
+    let busy = false;           // a slow tick (scan + pull) must not stack on the next one
     // Immediate first snapshot so a just-joined client can already fail over safely.
-    { const l0 = await resolveFull({ token }); if (l0 && await replicateSnapshot(l0, token)) { lastReplicate = Date.now(); lastReplicateOk = Date.now(); } }
-    // Periodic failover check + replication.
+    { const l0 = await resolveFull({ token }); if (l0 && (await pullSnapshot(l0, token)).ok) { lastReplicate = Date.now(); lastReplicateOk = Date.now(); } }
     const iv = setInterval(async () => {
       if (role !== 'client') { clearInterval(iv); return; }
-      const leader = await resolveFull({ token });
-      if (!leader) {
-        clearInterval(iv);
-        // Finding 3: auto-failover now promotes on the most recent replicated snapshot, so
-        // loss is BOUNDED to the replication interval (not the unbounded stale-DB loss).
-        const age = lastReplicateOk ? `~${Math.round((Date.now() - lastReplicateOk) / 1000)}s old` : 'NONE pulled — local DB may be stale/empty';
-        log(`leader vanished → re-electing on the last replicated snapshot (${age}); Finding-3 loss bounded to the ${Math.round(REPLICATE_MS / 1000)}s replication interval.`);
-        electAndRun();
-        return;
-      }
-      cacheLeader(leader);
-      if (Date.now() - lastReplicate >= REPLICATE_MS) {
-        lastReplicate = Date.now();   // stamp before the await so ticks don't stack pulls
-        if (await replicateSnapshot(leader, token)) lastReplicateOk = Date.now();
-      }
-    }, 15000);
+      if (busy) return;
+      busy = true;
+      try {
+        const leader = await resolveFull({ token });
+        if (!leader) {
+          if (Date.now() < holdoffUntil) return;   // just stepped down: let a replica take the term
+          clearInterval(iv);
+          // Finding 3: auto-failover promotes on the most recent replicated snapshot, so loss is
+          // BOUNDED by the pull interval (not the unbounded stale-DB loss).
+          const age = lastReplicateOk ? `~${Math.round((Date.now() - lastReplicateOk) / 1000)}s old` : 'NONE pulled — local DB may be stale/empty';
+          log(`leader vanished → re-electing on the last replicated snapshot (${age}).`);
+          electAndRun();
+          return;
+        }
+        cacheLeader(leader);
+        // A DRAINING leader is read-only and leaves the moment a replica holds its final snapshot:
+        // pull NOW (whatever the throttle says), then follow it closely instead of waiting a tick.
+        if (leader.draining || Date.now() - lastReplicate >= REPLICATE_MS) {
+          lastReplicate = Date.now();   // stamp before the await so ticks don't stack pulls
+          const pull = await pullSnapshot(leader, token);
+          if (pull.ok) lastReplicateOk = Date.now();
+          if (pull.draining || leader.draining) { clearInterval(iv); followDrain(leader); }
+        }
+      } finally { busy = false; }
+    }, TICK_MS);
+  }
+
+  // The leader told us it is leaving (drain stepdown). Keep pulling until it is gone — each pull
+  // taken while it is read-only is a complete copy, and the first such pull releases it — then
+  // elect at once rather than a tick later. Bounded: a leader that never leaves hands us back to
+  // the ordinary client loop.
+  async function followDrain(leader) {
+    log(`leader ${leader.host} is DRAINING for a stepdown → pulling its final snapshot and standing by to take the term`);
+    const end = Date.now() + DRAIN_FOLLOW_MAX_MS;
+    while (role === 'client' && Date.now() < end) {
+      const w = await whoami(leader.base, 1000);
+      if (!w) { log('draining leader is gone → electing now'); return electAndRun(); }
+      await pullSnapshot(leader, token);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (role === 'client') runClient();
   }
 
   async function electAndRun() {

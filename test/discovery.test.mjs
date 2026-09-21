@@ -7,7 +7,7 @@ import assert from 'node:assert';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { whoami, resolveFull, resolveFast, cacheLeader, outranks } from '../src/cc-discover.mjs';
 import { pkgVersion } from '../src/cc-rev.mjs';   // x-cc-version — the /api plane is version-gated
@@ -123,7 +123,62 @@ try {
   const w1 = await whoami('http://127.0.0.1:8792');
   assert.ok(w1.watermark >= 1, `whoami watermark advances after a message (got ${w1.watermark})`);
 
-  console.log('✅ discovery.test: all assertions passed (whoami, dead→null, resolveFull highest-epoch, resolveFast epoch-aware, outranks watermark-tiebreak, whoami watermark+rev)');
+  // --- a probe of a BLACK-HOLED peer must not outlive its deadline (issue 44) ------------------
+  // Two peers that swallow SYNs (TEST-NET-1 + a non-routable 10/8): the scan answers in ~1.5s
+  // either way — what regressed was the PROCESS, pinned ~9s more by the dangling connects. So
+  // measure a real child's wall-clock exit, not the await.
+  {
+    const { spawnSync } = await import('node:child_process');
+    const probe = "const { resolveFull } = await import(process.argv[1]); await resolveFull({});";
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe, new URL('../src/cc-discover.mjs', import.meta.url).href], {
+      encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, CC_DISCOVERY: 'peers', CC_PORT: '9', CC_PEERS: '192.0.2.1:8787,10.255.255.1:8787', CC_CACHE_DIR: mkdtempSync(join(tmpdir(), 'cccache-linger-')) },
+    });
+    const ms = Date.now() - t0;
+    assert.equal(r.status, 0, `probe child exited cleanly (${r.stderr})`);
+    assert.ok(ms < 5000, `a one-shot that probed black-holed peers exits at its own deadline, not undici's 10s connect timeout (took ${ms} ms)`);
+    console.log(`  ✓ black-holed peers: one-shot discovery process exited in ${ms} ms`);
+  }
+
+  // --- CC_DISCOVERY=peers confines discovery to the explicit peer list ------------------------
+  // A "stranger" bus: an all-interfaces whoami stub at epoch 99, advertised by a real LAN beacon
+  // on this test's scratch UDP port. In the default mode the scan ADOPTS it (whoami needs no
+  // token — that is how two dev fleets on one LAN once elected each other); in peers mode the
+  // scan must never even look.
+  {
+    const http = await import('node:http');
+    const { startBeacon } = await import('../src/cc-beacon.mjs');
+    const stranger = http.createServer((req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ role: 'leader', host: 'stranger', epoch: 99, watermark: 0 }));
+    });
+    await new Promise((r) => stranger.listen(8794, '0.0.0.0', r));
+    const stopBeacon = startBeacon({ host: 'stranger', epoch: 99, port: 8794, beaconPort: 8899, announceMs: 60000 });
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      delete process.env.CC_DISCOVERY;
+      const auto = await resolveFull({ lanTimeoutMs: 800 });
+      if (auto?.host !== 'stranger') {
+        // Some hosts (CI runners, locked-down NICs) never deliver a UDP broadcast back to the box.
+        // Then the control arm cannot show the stranger being adopted, and the confined arm would
+        // pass vacuously — say so instead of claiming coverage.
+        console.log('  (SKIP CC_DISCOVERY=peers: this host does not deliver LAN broadcasts, the control arm found ' + (auto?.host || 'nothing') + ')');
+      } else {
+        process.env.CC_DISCOVERY = 'peers';
+        rmSync(join(process.env.CC_CACHE_DIR, 'leader.json'), { force: true });   // the adopted stranger is cached — a confined node starts clean
+        const confined = await resolveFull({ lanTimeoutMs: 800 });
+        assert.equal(confined?.host, 'highEpoch', `CC_DISCOVERY=peers ignores a beaconed stranger at epoch 99 (got ${confined?.host}@${confined?.epoch})`);
+        console.log('  ✓ control: default discovery adopted the beaconed stranger@99; CC_DISCOVERY=peers did not');
+      }
+    } finally {
+      delete process.env.CC_DISCOVERY;
+      stopBeacon();
+      await new Promise((r) => stranger.close(r));
+    }
+  }
+
+  console.log('✅ discovery.test: all assertions passed (whoami, dead→null, resolveFull highest-epoch, resolveFast epoch-aware, outranks watermark-tiebreak, whoami watermark+rev, CC_DISCOVERY=peers)');
 } catch (e) {
   failed = true;
   console.error('❌ discovery.test FAILED:', e.message);

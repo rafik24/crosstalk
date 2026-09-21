@@ -178,7 +178,26 @@ snapshot (`GET /cc/export`, every `CC_REPLICATE_MS`, default 30s) and stores it 
 the leader's epoch. So when the leader vanishes and this node auto-promotes, it comes up on a
 **recent** copy of the bus — message loss is bounded to the replication interval instead of the
 unbounded loss of promoting on a stale/empty local DB. (A planned `migrate` still transfers the
-DB exactly; this only covers *unplanned* failover.)
+DB exactly; this only covers *unplanned* failover.) The client's failover check and its pull
+share one loop whose tick is `min(15s, CC_REPLICATE_MS)`, so a shorter `CC_REPLICATE_MS` is
+honoured (before 3.3.4 anything under 15s was silently ignored) and the real loss bound is
+**pull interval + one tick**.
+
+**A graceful stepdown loses nothing — drain.** `POST /cc/stepdown?drain=1` (admin) flips the
+leader **read-only** (writes get a retryable `503 {reason:"draining"}` + `Retry-After`, never a
+200 for a message about to vanish), and it exits as soon as a replica has pulled a snapshot taken
+after the last write finished — or at `CC_DRAIN_MS` (default 20s) if none shows up; with no
+replica pulling recently it degrades to the plain form at once. A replica that sees
+`x-cc-draining` follows the leader closely and takes the term the moment it is gone (~5s instead
+of a full tick), and the node that stepped down may join but not elect for one tick, so it cannot
+snatch the term back. The plain `POST /cc/stepdown` keeps its exact semantics — `migrate` (the
+target already imported the DB) and the outranked-leader monitor never wait.
+
+**Receivers survive a rewound history.** After an *unclean* failover the promoted node serves its
+last snapshot, so the newest ids of the old term are re-issued. Every receiver (`cc-ws`, the Codex
+bridge, pi) remembers the last 500 `(id → signature)` per channel and, on any term change,
+re-checks them: a re-issued id is delivered (once), an unchanged one is skipped, and the rewind is
+logged — instead of being silently discarded as "already seen".
 
 **Empty-snapshot guard.** A node with **no local DB at all** (never led, never replicated) will
 not promote over a live leader that discovery merely hadn't found yet — it does one final full
@@ -235,8 +254,15 @@ Each machine reads `~/.claude/.crosstalk` (or the legacy `~/.claude/.cross-claud
 - `CC_PORT` (default 8787) · `CC_BEACON_PORT` (default 8788).
 - `CC_AUTO_SUPERVISOR` — `1` makes each session's `cc-join.sh` `cc-bus ensure` a supervisor on
   this box (default off; see **Self-healing supervisors + coverage**).
-- `CC_REPLICATE_MS` (default 30000) — how often a client pulls the leader's snapshot; also the
-  bound on unplanned-failover message loss.
+- `CC_REPLICATE_MS` (default 30000) — how often a client pulls the leader's snapshot. The
+  unplanned-failover loss bound is this **plus one client tick** (`min(15s, CC_REPLICATE_MS)`).
+- `CC_DISCOVERY` — `peers` confines discovery to pin + cache + loopback + the explicit `CC_PEERS`
+  list: no LAN solicit, no tailnet scan, and no beacon. `/cc/whoami` is unauthenticated by design,
+  so the default (`auto`) adopts **any** reachable bus with a higher epoch — right for a
+  zero-config estate, wrong for a dev fleet, a CI run or a box on an untrusted LAN.
+- `CC_BIND` — interface the hosted server binds (default `127.0.0.1`). An **empty** value means
+  the default; before 3.3.4 an exported-empty `CC_BIND=` bound every interface.
+- `CC_DRAIN_MS` (default 20000) — deadline of a drain stepdown (see **Failover keeps the messages**).
 
 Opt-in per machine (the join hook no-ops if the file is absent) and **git-ignored** — the
 token never belongs in version control. Firewall: allow inbound **TCP 8787** + **UDP 8788**
@@ -428,11 +454,12 @@ no bridge daemon, no forked receiver. The design was settled live with a pi sess
 
 Run the suite with `npm test` = `npm run test:unit` (paths · render · db · rest · server · ws ·
 discovery · supervisor · console · version-gate · listen-gate · codex-bridge · pi-extension; seconds)
-then `npm run test:fleet` (~4 min: `fleet.test` — real supervisors electing, replicating, being
+then `npm run test:fleet` (~8 min: `fleet.test` — real supervisors electing, replicating, being
 killed and promoting, incl. the same-host #35 guard — and `turnplay.test` — three scripted lanes
-playing addressing → claim-lock race → handoff → ACK → done → failover). Every test is
+playing addressing → claim-lock race → handoff → ACK → done → failover — `replication.test` — the
+loss bound and the drain stepdown — and `cursor-rewind.test` — a lane surviving re-issued ids). Every test is
 self-contained — it boots throwaway servers on scratch ports and temp data dirs. The fleet tests are
-slow by nature: a client's failover check and replication pull ride one fixed 15 s tick. Poke a
+slow by nature: an unclean failover costs one client tick (15 s at the default) plus the election. Poke a
 fleet by hand with `node dev/fleet.mjs up 3`, `… kill-leader`, `… status`, `… down` (it lives in
 the OS temp dir, never `~/.crosstalk`; judge roles by `/cc/whoami`, not `supervisor.json`, which
 lags a promotion and survives an unclean kill). To exercise a

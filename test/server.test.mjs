@@ -375,6 +375,28 @@ async function main() {
     console.log('server.test: PASS (refuse-run-open M1)');
   }
 
+  // ---- Empty CC_BIND must mean loopback, never "all interfaces" (issue 45) -------
+  {
+    // `CC_BIND=` exported EMPTY is not nullish: with `??` it reached listen(port, '') and bound
+    // every interface while the README promises a loopback default. The listening socket's own
+    // address is the evidence — not the config object.
+    const saved = process.env.CC_BIND;
+    process.env.CC_BIND = '';
+    const app = await startServer({
+      port: 8824, apiKey: 'k', host: 'x', epoch: 1,
+      createDB: createStubDB, createRestRouter: createStubRouter, log: () => {},
+    });
+    try {
+      const addr = app.server.address();
+      assert.equal(addr.address, '127.0.0.1', `empty CC_BIND binds loopback only (bound ${addr.address})`);
+      assert.equal(app.config.bind, '127.0.0.1', 'the banner/config report the effective bind');
+    } finally {
+      await app.close();
+      if (saved === undefined) delete process.env.CC_BIND; else process.env.CC_BIND = saved;
+    }
+    console.log('server.test: PASS (empty CC_BIND → loopback, issue 45)');
+  }
+
   // ---- Admin scope (H2): export/stepdown reject the chat token when CC_ADMIN_KEY set ----
   {
     const ADMIN = 'admin-secret-xyz';
