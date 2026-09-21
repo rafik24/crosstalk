@@ -42,6 +42,7 @@ async function round(name, size) {
   // Start everything at once and WATCH the race (informational: how many nodes ever led at the
   // same instant), then REQUIRE convergence. stableMs 8s > the 5s leader-monitor tick, so a double
   // promotion that is still being resolved cannot pass.
+  f.assertSlotFree();   // startNode() by hand bypasses up()'s busy-slot refusal
   for (let i = 0; i < size; i++) f.startNode(i);
   let peak = 0;
   const watch = setInterval(async () => { try { peak = Math.max(peak, (await f.leaders()).length); } catch {} }, 300);
@@ -59,7 +60,7 @@ async function round(name, size) {
   }
   const bad = f.hermeticityViolations();
   ok(bad.length === 0, `${name}: hermetic${bad.length ? ' — ' + bad.join('; ') : ''}`);
-  const left = await f.destroy();
+  const left = failed ? await f.down() : await f.destroy();   // keep the evidence when something failed
   ok(left.length === 0, `${name}: teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`);
   fleets.pop();
   return l;

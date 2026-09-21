@@ -294,15 +294,33 @@ export class Fleet {
     return bad;
   }
 
+  // Throws when any of this slot's ports is already held. up() calls it; a test that starts nodes
+  // by hand (startNode) MUST call it too — otherwise it can converge on a leader it never started
+  // (every fleet's hosts are node0..N) and its teardown would then kill that stranger.
+  assertSlotFree() {
+    const held = [];
+    for (let i = 0; i < this.size; i++) for (const l of listeners(this.port(i))) held.push(`:${this.port(i)} (pid ${l.pid})`);
+    if (held.length) throw new Error(`fleet slot ${this.slot} is busy — ${held.join(', ')} already listening. Use another --slot / CC_FLEET_SLOT, or 'down' the owner.`);
+  }
+
+  // Supervisors this harness did NOT spawn can appear on a node (`cc-bus ensure` starts a DETACHED
+  // one). Adopt whatever each node's heartbeat names, so down() sweeps it. Safe: down() only kills
+  // a pid whose command line is a `cc-bus.mjs start`.
+  adoptAll() {
+    for (let i = 0; i < this.size; i++) {
+      const s = this.supervisor(i);
+      if (s?.pid && !this.spawned.includes(s.pid)) this.spawned.push(s.pid);
+      if (s?.pid && pidAlive(s.pid) && this.nodes[i] && !pidAlive(this.nodes[i].pid)) this.nodes[i] = { ...this.nodes[i], pid: s.pid };
+    }
+  }
+
   // Default: node 0 first (it bootstraps the bus), then the rest join as clients — deterministic.
   // simultaneous: start them ALL at once — the cold-start election race (X1's one-box analogue).
   async up({ simultaneous = false, timeoutMs = 45000 } = {}) {
     // Refuse a slot that is already in use (a concurrent run in another worktree, or survivors of
     // an interrupted one): starting on top of it would elect against a stale leader, and the
     // cleanup would then be tempted to kill processes this fleet never started.
-    const held = [];
-    for (let i = 0; i < this.size; i++) for (const l of listeners(this.port(i))) held.push(`:${this.port(i)} (pid ${l.pid})`);
-    if (held.length) throw new Error(`fleet slot ${this.slot} is busy — ${held.join(', ')} already listening. Use another --slot / CC_FLEET_SLOT, or 'down' the owner.`);
+    this.assertSlotFree();
     mkdirSync(this.dir, { recursive: true });
     if (simultaneous) {
       for (let i = 0; i < this.size; i++) this.startNode(i);
@@ -374,8 +392,10 @@ export class Fleet {
   }
 
   // Kill every supervisor tree, THEN sweep the ports: a supervisor that died uncleanly earlier may
-  // have orphaned its server child (Windows: always, unless tree-killed), and that orphan would
-  // outlive the fleet holding a port and a DB handle. NOTHING is killed on the strength of a
+  // have orphaned its server child (measured: NOT on Windows 11 / node 24 for a non-detached child —
+  // libuv's kill-on-close job object takes it down with the parent — but a SIGKILLed supervisor on
+  // POSIX, or any detached server, does), and that orphan would outlive the fleet holding a port
+  // and a DB handle. NOTHING is killed on the strength of a
   // recorded pid or a port number alone — a kept slot dir outlives a reboot (pids are recycled)
   // and a port can be held by a stranger: a supervisor must still be a `cc-bus.mjs start`, a
   // port-holder must be a server.mjs that answers whoami as one of THIS fleet's hosts.
@@ -383,6 +403,7 @@ export class Fleet {
   // why we could not look). Refusing to kill an unidentified process is the right failure
   // direction, but it must be LOUD — callers assert the list is empty.
   async down() {
+    this.adoptAll();
     const pids = new Set([...this.spawned, ...this.nodes.filter(Boolean).map((n) => n.pid)]);
     for (const pid of pids) if (this.#isOurSupervisor(pid)) killTree(pid, { clean: false });
     const hosts = new Set(Array.from({ length: this.size }, (_, i) => this.hostOf(i).toLowerCase()));
