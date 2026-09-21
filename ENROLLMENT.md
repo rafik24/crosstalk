@@ -230,7 +230,7 @@ Codex hooks use the same protocol as Claude Code hooks, so enrolment is one file
 ```bash
 # 1. copy the template and point <plugin-src> at the installed plugin's src dir
 #    (plugin: ~/.claude/plugins/cache/crosstalk/crosstalk/<version>/src · checkout: ~/crosstalk/src)
-cp hooks/codex-hooks.json ~/.codex/hooks.json && sed -i 's#<plugin-src>#/home/you/cross-claude-client/src#g' ~/.codex/hooks.json
+cp hooks/codex-hooks.json ~/.codex/hooks.json && sed -i 's#<plugin-src>#~/.claude/plugins/cache/crosstalk/crosstalk/<version>/src#g' ~/.codex/hooks.json
 # 2. start codex once, run /hooks, approve the three hooks (hash-pinned; re-approve after an update)
 ```
 

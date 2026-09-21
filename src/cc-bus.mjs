@@ -297,6 +297,10 @@ async function cmdStart() {
     // the one safe moment for the replica → messages.db rename.
     const adoption = adoptReplicaIfFresher();
     if (adoption === 'adopted') log('adopted the replicated snapshot as messages.db for this promotion');
+    // Review finding 2: an adoption ERROR (EBUSY — e.g. an orphaned old server still holding
+    // messages.db) means we are about to promote on a possibly-STALE local DB. Say so loudly;
+    // silence here is how the #35 loss class comes back.
+    else if (String(adoption).startsWith('error')) log(`⚠️  replica adoption FAILED (${adoption}) — promoting on the LOCAL DB, which may be stale. If an old server process still holds messages.db on this box, kill it.`);
     // #7 empty-snapshot guard: never blank the bus. If this node has NO local DB at all (never
     // led, never replicated), do one final full scan before promoting — a just-joined node must
     // not promote an empty store over a leader that discovery merely hadn't found yet. A node that
@@ -448,10 +452,20 @@ async function cmdStart() {
 // path — the handover terminates whatever pid the file names, and that escalation must never
 // run on the strength of a record we can't attribute to a versioned supervisor. (A legacy
 // supervisor therefore needs one last manual kill; every one written by this code is covered.)
-// Exported for the test suite.
+// And the handover is DIRECTIONAL (review finding 1): only a strictly NEWER install may replace
+// a running supervisor. On `!==` alone, a lingering older install (a pinned dev checkout, a
+// stale cache) would kill the newer supervisor right back — bidirectional thrash, with the
+// OLDER code winning the last round and version-gating the whole upgraded fleet out: the exact
+// failure #37 exists to fix, reintroduced by the fix. Exported for the test suite.
+function semverNewer(a, b) {   // true ⇔ a > b (numeric x.y.z compare; missing parts = 0)
+  const pa = String(a).split('.').map((n) => parseInt(n) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n) || 0);
+  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0); }
+  return false;
+}
 export function needsVersionHandover(live, myVersion = pkgVersion()) {
   if (!live || !myVersion || !live.version) return false;
-  return live.version !== myVersion;
+  return semverNewer(myVersion, live.version);
 }
 
 // The log sink for a hook-started supervisor (#36): stdio used to be 'ignore', so a wedged or
@@ -465,9 +479,15 @@ function ensureLogFd() {
   } catch { return 'ignore'; }
 }
 
-function cmdEnsure() {
+function cmdEnsure(afterHandover = false) {
   const live = supervisorLive();
   if (live && needsVersionHandover(live)) {
+    if (afterHandover) {
+      // One attempt only (review finding 5): a kill that failed (EPERM, respawn race) must not
+      // loop the SessionStart hook's child forever. Say what a human must do and stop.
+      log(`handover did not free the slot — supervisor pid ${live.pid} (v${live.version}) survived; kill it manually, then start a session`);
+      return;
+    }
     // Issue #37: a supervisor from a superseded plugin install keeps running old code (and, when
     // it leads, version-gates the whole upgraded fleet out) until killed by hand. Hand over: ask
     // a local leader to step down gracefully (its client peers promote on a fresh snapshot),
@@ -483,7 +503,7 @@ function cmdEnsure() {
     // The stale heartbeat would block the respawn below for up to SUPERVISOR_STALE_MS; drop it.
     try { rmSync(SUPERVISOR_FILE); } catch {}
     // Defer the respawn past the kill escalation so old and new never overlap on the port.
-    setTimeout(() => { try { cmdEnsure(); } catch {} }, 6000);
+    setTimeout(() => { try { cmdEnsure(true); } catch {} }, 6000);
     return;
   }
   if (live) { log(`supervisor already running here (pid ${live.pid}, role ${live.role || '?'}, v${live.version || '?'}) — nothing to do`); return; }

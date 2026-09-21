@@ -251,14 +251,19 @@ export async function startServer(opts = {}) {
       );
   });
 
+  // Both static files are served with an explicit `root` so express/send's dotfiles check
+  // applies only to the RELATIVE part. With a bare absolute path, `dotfiles: 'ignore'` (the
+  // default) 404s when ANY path segment starts with a dot — and every plugin install lives
+  // under ~/.claude/…, so /console (and /openapi.json) 404'd on EVERY plugin-run leader while
+  // working from a plain checkout. Found live on the 3.3.2 fleet (issue #41).
   app.get('/openapi.json', (_req, res, next) => {
-    res.sendFile(path.join(__dirname, 'openapi.json'), (err) => {
+    res.sendFile('openapi.json', { root: __dirname }, (err) => {
       if (err) next(err);
     });
   });
 
   app.get('/console', (_req, res, next) => {
-    res.sendFile(path.join(REPO_ROOT, 'src', 'cc-console.html'), (err) => {
+    res.sendFile('cc-console.html', { root: path.join(REPO_ROOT, 'src') }, (err) => {
       if (err) next(err);
     });
   });

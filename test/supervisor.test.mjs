@@ -142,6 +142,10 @@ try {
     const { needsVersionHandover } = await import('../src/cc-bus.mjs');
     ok(needsVersionHandover({ version: '0.0.1' }, '9.9.9') === true, '#37: stale-version supervisor → handover');
     ok(needsVersionHandover({ version: '9.9.9' }, '9.9.9') === false, '#37: same version → healthy, no handover');
+    ok(needsVersionHandover({ version: '9.9.9' }, '0.0.1') === false,
+      '#37: an OLDER install never kills a newer supervisor (directional — no downgrade, no thrash)');
+    ok(needsVersionHandover({ version: '3.3.10' }, '3.3.9') === false && needsVersionHandover({ version: '3.3.9' }, '3.3.10') === true,
+      '#37: numeric semver compare, not string compare (3.3.10 > 3.3.9)');
     ok(needsVersionHandover({}, '9.9.9') === false,
       '#37: a version-less heartbeat NEVER triggers the kill path (unattributable pid — this exact test process was killed by the first draft)');
     ok(needsVersionHandover(null, '9.9.9') === false, '#37: no live supervisor → nothing to hand over');
