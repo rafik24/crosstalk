@@ -126,7 +126,8 @@ try {
   // --- I5 silence -------------------------------------------------------------------------------
   console.log('I5 ambient chatter does not wake Qwen');
   const before = po.inbox.filter((e) => e.msg.sender === QWEN).length;
-  const prompts = () => (readFileSync(join(SCRATCH, 'qwen-serve.log'), 'utf8').match(/prompt enqueued/g) || []).length;
+  const serveLog = join(QHOME, '.claude', '.cc-listen', 'qwen-lanes', QWEN.replace(/[^A-Za-z0-9._-]/g, '_'), 'qwen-serve.log');
+  const prompts = () => (readFileSync(serveLog, 'utf8').match(/prompt enqueued/g) || []).length;
   const p0 = prompts();
   await pi.send('all', 'pi lane thinking out loud on #general — nobody is addressed here');
   await sleep(12000);
