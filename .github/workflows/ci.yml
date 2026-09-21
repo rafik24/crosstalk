@@ -1,15 +1,29 @@
 name: CI
 
-# The gate for Crosstalk: every push and PR runs the full test suite.
+# The gate for Crosstalk: every PR (and every push to main) runs the FULL suite — the fast
+# in-process tests AND the fleet tests (real cc-bus supervisors electing / replicating / failing
+# over, scripted lanes playing the coordination contract) — on BOTH operating systems the estate
+# runs. Process-tree kills, file locking, rename-over-open and signal handling all differ between
+# them, and that is exactly where the failover bugs have lived.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false        # one OS going red must not hide the other's verdict
       matrix:
+        os: [ubuntu-latest, windows-latest]
         # node:sqlite (DatabaseSync) is available unflagged from v22.13 (LTS) / v24; the server
         # has no native deps to compile, so npm ci is pure-JS (express + zod).
         node: ['22', '24']
@@ -19,4 +33,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci
-      - run: npm test
+      - name: Unit + in-process integration
+        run: npm run test:unit
+      - name: Fleet (real supervisors) + turn-play (scripted lanes)
+        run: npm run test:fleet

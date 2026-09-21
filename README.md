@@ -123,6 +123,7 @@ hooks, skill, and reviewer agent sit in `.claude-plugin/`, `hooks/`, `skills/`, 
 | `skills/crosstalk/SKILL.md` | The `crosstalk` skill (shipped by the plugin; invoked `Skill(crosstalk:crosstalk)`). |
 | `.claude-plugin/plugin.json` · `hooks/hooks.json` · `agents/crosstalk-reviewer.md` | Plugin manifest · the SessionStart + PreToolUse hooks · the reviewer agent. |
 | `ENROLLMENT.md` | Step-by-step to wire a new Claude Code CLI install onto the bus. |
+| `dev/fleet.mjs` · `dev/fake-lane.mjs` | **Dev/QA harness, not shipped behaviour.** `fleet.mjs` = fleet-in-a-box: N real `cc-bus` supervisors on one machine, hermetically isolated (scratch config/cache/data per node, ports `8850 + slot*20 + i`, scratch beacon, operator env blanked) — CLI `up/status/kill-leader/stepdown/down` + importable `Fleet`. `fake-lane.mjs` = a scripted bus participant (a real child process on the real `cc-receive` engine, driven over NDJSON stdio) for multi-agent turn-play with zero real sessions. |
 | `test/*.test.mjs` | Regression suite (`npm test`): render/wrap + addressed filter · db (storage + atomic claim) · rest (API + work board) · server (auth/admin/limits + real integration) · WS push + backfill · discovery/highest-epoch + watermark tiebreak · supervisor singleton (`ensure` idempotency). |
 
 ## Real-time push (WebSocket) + cursor backfill
@@ -425,9 +426,16 @@ no bridge daemon, no forked receiver. The design was settled live with a pi sess
 
 ## Development
 
-Run the suite with `npm test` (paths · render · db · rest · server · ws · discovery · supervisor ·
-console · version-gate · listen-gate · codex-bridge · pi-extension). Every test is
-self-contained — it boots throwaway servers on scratch ports and temp data dirs. To exercise a
+Run the suite with `npm test` = `npm run test:unit` (paths · render · db · rest · server · ws ·
+discovery · supervisor · console · version-gate · listen-gate · codex-bridge · pi-extension; seconds)
+then `npm run test:fleet` (~4 min: `fleet.test` — real supervisors electing, replicating, being
+killed and promoting, incl. the same-host #35 guard — and `turnplay.test` — three scripted lanes
+playing addressing → claim-lock race → handoff → ACK → done → failover). Every test is
+self-contained — it boots throwaway servers on scratch ports and temp data dirs. The fleet tests are
+slow by nature: a client's failover check and replication pull ride one fixed 15 s tick. Poke a
+fleet by hand with `node dev/fleet.mjs up 3`, `… kill-leader`, `… status`, `… down` (it lives in
+the OS temp dir, never `~/.crosstalk`; judge roles by `/cc/whoami`, not `supervisor.json`, which
+lags a promotion and survives an unclean kill). To exercise a
 change against an **isolated** bus while a real one is running, hard-pin the client at your instance:
 `node src/cc-work.mjs <cmd> --pin http://localhost:<port> --token <key>` — `--pin` bypasses discovery, so
 the command can't route to a higher-epoch live leader.
