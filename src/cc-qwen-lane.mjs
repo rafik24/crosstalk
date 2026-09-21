@@ -24,6 +24,7 @@
 //   node cc-qwen-lane.mjs stop   --lane <identity>
 //   node cc-qwen-lane.mjs profile --id <identity> [--model ID]        # print the lockdown settings (no side effects)
 //   node cc-qwen-lane.mjs inventory --serve URL                        # exit 0 / 3 + the offending tools
+//   env: QWEN_BIN (default `qwen`; a *.mjs path is run with node — tests), CC_QWEN_UNSAFE_PROFILE=1 (loud override of step 4)
 // Zero deps.
 // ---------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
@@ -136,7 +137,10 @@ async function main() {
   writeFileSync(settingsPath, JSON.stringify(lockdownSettings({ id, model: opt('--model', null), laneEnv }), null, 2), { mode: 0o600 });
 
   const log = openSync(join(dir, 'qwen-serve.log'), 'a');
-  const child = spawn('qwen', ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--workspace', workspace, '--max-sessions', '1'],
+  // QWEN_BIN may be a *.mjs/*.js file (run under this node) so tests can substitute a fake daemon without a shell.
+  const qbin = process.env.QWEN_BIN || 'qwen';
+  const [qfile, qpre] = /\.(mjs|cjs|js)$/i.test(qbin) ? [process.execPath, [qbin]] : [qbin, []];
+  const child = spawn(qfile, [...qpre, 'serve', '--port', String(port), '--hostname', '127.0.0.1', '--workspace', workspace, '--max-sessions', '1'],
     { cwd: workspace, env: { ...process.env, QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsPath }, detached: true, stdio: ['ignore', log, log] });
   child.unref();
   const state = { id, servePid: child.pid, serve, workspace, settingsPath };
@@ -146,7 +150,10 @@ async function main() {
   const s = await (await fetch(serve + '/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: workspace }) })).json().catch(() => ({}));
   if (!s.sessionId) abort('qwen serve refused the session: ' + JSON.stringify(s).slice(0, 200), 1);
 
-  const inv = await liveInventory(serve);                                   // step 4 — the boundary check
+  // step 4 — the boundary check. A daemon that is still initializing is polled (bounded); it never passes by default.
+  let inv = await liveInventory(serve);
+  for (let i = 0; i < 20 && inv.violations.some((v) => /not initialized/.test(v)); i++) { await sleep(750); inv = await liveInventory(serve); }
+  if (inv.violations.length && process.env.CC_QWEN_UNSAFE_PROFILE === '1') console.log(`⚠️ UNSAFE lane accepted by CC_QWEN_UNSAFE_PROFILE=1: ${inv.violations.join(', ')}`);
   if (inv.violations.length && process.env.CC_QWEN_UNSAFE_PROFILE !== '1') abort(`the live session exposes tools a bus lane must not have: ${inv.violations.join(', ')} (Qwen upgrade? re-audit BUILTIN_TOOLS)`);
   if (!inv.names.some((n) => ALLOWED_TOOL.test(n))) abort('the crosstalk MCP tools are not registered in the live session (MCP server failed to start?)');
 
