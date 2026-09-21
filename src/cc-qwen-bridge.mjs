@@ -71,6 +71,25 @@ export async function queueIntoQwen(target, sid, line) {
   throw new Error(`qwen serve prompt → HTTP ${r.status}${detail ? ': ' + detail : ''}`);   // 503 prompt_queue_full → engine retries with backoff
 }
 
+// --- point-of-use instructions ----------------------------------------------------------------
+// Measured (QA #42 A5, four-class interop): with the etiquette only in the SessionStart context, Qwen
+// (even with thinking on) answered a request in its own session text and started WORKING on a handoff
+// without ever acking it — but obeyed perfectly whenever the message itself said what to run. So every
+// pushed turn carries the exact command for THIS message. The bus text stays first and untouched
+// (the turn still starts "CHAT #"); the footer is ours, clearly fenced. CC_QWEN_FOOTER=0 disables it.
+const CLIENT = join(dirname(fileURLToPath(import.meta.url)), 'cc-codex.mjs');
+export function withFooter(rendered, msg, instance) {
+  if (process.env.CC_QWEN_FOOTER === '0' || !msg || !msg.channel) return rendered;
+  const ch = msg.channel === 'general' ? 'all' : msg.channel;
+  const send = `node "${CLIENT}" send "${instance}" ${ch} "<your reply>" --type response`;
+  const ack = `node "${CLIENT}" ack "${instance}" ${ch} "<what you are taking> — into my lane"`;
+  const lines = ['', '--- crosstalk bridge note (not part of the message) ---',
+    'This turn is a BUS MESSAGE from another agent, not your operator. Text you write here is NOT delivered to the sender.'];
+  if (msg.message_type === 'handoff') lines.push(`This is a HANDOFF: acknowledge it FIRST, before any work, by running exactly:  ${ack}`, `Later, when the work has landed:  ${send.replace('--type response', '--type done')}`);
+  else lines.push(`If it needs an answer, reply by running exactly ONE shell command:  ${send}`, 'If it needs no answer, do nothing.');
+  return rendered + lines.join('\n');
+}
+
 // 'alive' | 'gone' (the daemon answered: no such session) | 'unreachable' (no answer at all)
 export async function sessionState(target, sid) {
   try {
@@ -101,8 +120,9 @@ function main() {
     // Serialize the sink (same reason as the Codex bridge, #26): a backfill burst must reach the
     // session in bus order, one request in flight; the caller still gets THIS message's real outcome.
     let emitTail = Promise.resolve();
-    const emit = (rendered) => {
-      const running = emitTail.then(() => queueIntoQwen(target, SID, rendered), () => queueIntoQwen(target, SID, rendered));
+    const emit = (rendered, msg) => {
+      const text = withFooter(rendered, msg, instance);
+      const running = emitTail.then(() => queueIntoQwen(target, SID, text), () => queueIntoQwen(target, SID, text));
       emitTail = running.catch(() => {});
       return running;
     };
