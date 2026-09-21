@@ -2,8 +2,10 @@
 // known-edges.test.mjs — CHARACTERISATION of two known, un-fixed edges (issue 49; from the QA
 // program's "known-not-covered" list).   node test/known-edges.test.mjs
 //
-// These assertions PIN TODAY'S BEHAVIOUR — they are not endorsements. Each one is a tripwire: when
-// the edge is fixed the assertion goes red, and whoever fixed it replaces it with the real
+// These assertions PIN TODAY'S BEHAVIOUR — they are not endorsements. Each one is a tripwire IF the
+// fix lands in the function it exercises (a fix elsewhere — e.g. in how cc-bus derives HOST — needs
+// its own test; the coverage line below only ILLUSTRATES a consequence): when such a fix lands the
+// assertion goes red, and whoever fixed it replaces it with the real
 // contract (and closes the issue). Until then nobody can change the behaviour by accident, and
 // nobody can assume it away.
 //
@@ -17,7 +19,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const DATA_DIR = mkdtempSync(join(tmpdir(), 'ccedges-'));
-process.env.CC_DATA_DIR = DATA_DIR;   // importing cc-bus must never resolve the real ~/.crosstalk
+process.env.CC_DATA_DIR = DATA_DIR;   // importing cc-bus must never resolve the real ~/.crosstalk …
+process.env.CC_BUS_CONFIG = join(DATA_DIR, 'no-such-config');   // … nor read the operator's real bus config (token)
 
 const { canonicalShort } = await import('../src/cc-render.mjs');
 const { needsVersionHandover, failoverCoverage } = await import('../src/cc-bus.mjs');
@@ -30,7 +33,7 @@ const ok = (cond, msg) => { if (!cond) { failed = true; console.error('  ✗', m
 try {
   console.log('E1 host-id canonicalisation collides (issue 49)');
   ok(new Set(['box_1', 'box-1', 'BOX 1', 'Box__1'].map(canonicalShort)).size === 1, `four different hostnames → one id (${canonicalShort('box_1')})`);
-  ok(canonicalShort('ünï') === 'n' && canonicalShort('机器一') === canonicalShort('机器二'), 'non-ASCII is stripped: distinct non-Latin hostnames collapse together');
+  ok(canonicalShort('ünï') === 'n' && canonicalShort('机器一') === '' && canonicalShort('机器二') === '', "non-ASCII is stripped: distinct non-Latin hostnames BOTH become '' — which cc-bus turns into 'unknown-host', so every such box shares one id");
   // …and what keys on it:
   ok(outranks({ epoch: 5, watermark: 0, host: 'box_1' }, { epoch: 5, watermark: 0, host: 'box-1' }) === false
     && outranks({ epoch: 5, watermark: 0, host: 'box-1' }, { epoch: 5, watermark: 0, host: 'box_1' }) === false,
@@ -38,7 +41,7 @@ try {
   const cov = failoverCoverage([
     { instance_id: 'cc-bus-supervisor/box-1', status: 'online' },   // box_1 and box-1 both register THIS id
   ], 'box_1');
-  ok(cov.hosts.length === 1 && cov.backups.length === 0, 'two colliding supervisors are ONE presence id → coverage reports no standby');
+  ok(cov.hosts.length === 1 && cov.backups.length === 0, '(illustration) two colliding supervisors register ONE presence id → coverage reports no standby');
 
   console.log('E2 prerelease versions are never handed over (issue 49)');
   ok(needsVersionHandover({ version: '3.3.4-rc1' }, '3.3.4') === false, 'final 3.3.4 does NOT replace a running 3.3.4-rc1 supervisor');
