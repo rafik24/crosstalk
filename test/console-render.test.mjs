@@ -164,4 +164,3 @@ const escapedOnly = (out, where) => {
 }
 
 console.log('✅ console-render.test: all assertions passed (escaping in every render path incl. datalist, exactly-once, mention-chip boundaries, id-ordered insertion + grouping, fallback glyph)');
-
