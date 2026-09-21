@@ -55,7 +55,8 @@ try {
   // Claude Code edits carry tool_input.file_path. Codex CLI (≥0.154) edits are `apply_patch`
   // with NO path field — the paths live in the patch headers inside tool_input.command
   // (`*** Update File: x` / `*** Add File: x` / `*** Delete File: x` / `*** Move to: x`).
-  if (!/^(Edit|Write|MultiEdit|NotebookEdit|apply_patch)$/.test(tool)) done(0);
+  // Qwen Code edits are `write_file` / `edit`, both with an absolute tool_input.file_path (probed live 2026-09-21).
+  if (!/^(Edit|Write|MultiEdit|NotebookEdit|apply_patch|write_file|edit)$/.test(tool)) done(0);
 
   const ti = payload.tool_input || {};
   // Codex patch headers are RELATIVE to the session cwd (`*** Update File: core/x.py`), so every
