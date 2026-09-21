@@ -79,12 +79,12 @@ cleanupOnSignal(() => fleets);   // (down() adopts ensure-spawned supervisors it
 // A run killed by SIGINT never reaches its finally: sweep copies left by DEAD runs. Only ever
 // `.qa-scratch/handover-<pid>` directories this suite's naming produced, and only when that pid is
 // no longer alive — plain directories, no links are ever created here.
-try {
-  for (const d of readdirSync(join(ROOT, '.qa-scratch'))) {
-    const m = d.match(/^handover-(\d+)$/);
-    if (m && !pidAlive(Number(m[1]))) rmSync(join(ROOT, '.qa-scratch', d), { recursive: true, force: true });
-  }
-} catch {}
+let staleCopies = [];
+try { staleCopies = readdirSync(join(ROOT, '.qa-scratch')); } catch {}
+for (const d of staleCopies) {
+  const m = d.match(/^handover-(\d+)$/);
+  if (m && !pidAlive(Number(m[1]))) { try { rmSync(join(ROOT, '.qa-scratch', d), { recursive: true, force: true }); } catch {} }   // one busy dir must not stop the sweep
+}
 
 try {
   const OLD = makeCopy('old', OLD_V), NEW = makeCopy('new', NEW_V);
@@ -138,6 +138,7 @@ try {
     const out3 = ensure(NEW, f.nodeEnv(ci));
     ok(/version handover/.test(out3), `ensure announced the client handover (${out3.trim().split('\n')[0]})`);
     const sup3 = await f.waitFor(() => { const s = f.supervisor(ci); return s && s.version === NEW_V && s.pid !== oldClient && pidAlive(s.pid) && s.role !== 'starting' ? s : null; }, 60000, 250);
+    ok(sup3?.role === 'client', `it really was the CLIENT path: the new supervisor on node${ci} joined as a client (${sup3?.role})`);
     ok(!!sup3 && !pidAlive(oldClient), `node${ci}: old client supervisor pid ${oldClient} gone, new pid ${sup3?.pid} v${sup3?.version} (${sup3?.role})`);
     adopt(ci);
     const l3 = await f.waitSingleLeader({ timeoutMs: 45000, stableMs: 8000 });
