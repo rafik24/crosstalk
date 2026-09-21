@@ -57,7 +57,7 @@ const noop = () => 0;
 
 const factory = new Function(
   'document', 'localStorage', 'location', 'window', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'fetch', 'AbortController',
-  js + '\n;return { addMsg, renderBanner, renderRoster, renderChannels, workRowHtml, renderWorkSummary, openMentions, msgLog, seenIds: () => seenIds, $ };',
+  js + '\n;return { addMsg, renderBanner, renderRoster, renderChannels, workRowHtml, renderWorkSummary, openMentions, markChannelRead, needsAttention, loadWork: (items) => { workItems = new Map(items.map((x) => [x.id, x])); renderBoard(); }, msgLog, seenIds: () => seenIds, $ };',
 );
 const c = factory(document, localStorage, location, window, noop, noop, noop, noop, () => Promise.reject(new Error('offline')), class { constructor() { this.signal = {}; } abort() {} });
 
@@ -98,13 +98,22 @@ const escapedOnly = (out, where) => {
   assert.ok(b.includes('&quot;<span class="at">@me</span>&amp;#39;'), 'a literal &#39; in content survives as text, not as a quote');
   assert.ok(!/<span class="at[^"]*">[^<]*&/.test(b), 'no chip ever contains an ampersand');
   // id-ordered insertion + grouping: a pushed newer id, then the sweep brings the older one
-  c.addMsg({ id: 10, channel: 'ops', sender: 'lane', message_type: 'status', content: 'second', created_at: '2026-09-14 11:00:05' });
-  c.addMsg({ id: 9, channel: 'ops', sender: 'lane', message_type: 'status', content: 'first', created_at: '2026-09-14 11:00:00' });
+  c.addMsg({ id: 10, channel: 'ops', sender: 'lane', message_type: 'message', content: 'second', created_at: NOW });
+  c.addMsg({ id: 9, channel: 'ops', sender: 'lane', message_type: 'message', content: 'first', created_at: NOW });
   const ids = stream.children.map((r) => r._m.id);
   assert.deepEqual(ids.slice(-2), [9, 10], 'rows are kept in id order even when pushed out of order');
   const last = stream.children[stream.children.length - 1];
   assert.ok(last.classList.contains('cont'), 'the later row of one sender+channel thread shares the header');
   assert.ok(!stream.children[stream.children.length - 2].classList.contains('cont'), 'the earlier row keeps its header');
+  // operator inbox: actionable recent messages are unread, long bodies collapse, and routing
+  // actions are rendered on the message itself.
+  c.addMsg({ id: 20, channel: 'dm-peer', sender: 'peer', message_type: 'request', content: 'Please review. ' + 'detail '.repeat(50), created_at: NOW });
+  const inboxRow = stream.children.find((r) => r._m?.id === 20);
+  assert.equal(inboxRow.dataset.attention, '1', 'recent unread DM request enters Attention');
+  assert.ok(inboxRow.className.includes('collapsed'), 'long payload defaults to a collapsed preview');
+  assert.ok(inboxRow.innerHTML.includes('data-action="reply"') && inboxRow.innerHTML.includes('data-action="expand"'), 'message exposes reply and expand actions');
+  c.markChannelRead('dm-peer');
+  assert.equal(inboxRow.dataset.attention, '', 'opening a conversation clears its Attention state persistently');
 }
 
 // ---- unacked-handoff strip ----------------------------------------------------------------------
@@ -135,6 +144,12 @@ const escapedOnly = (out, where) => {
   c.renderWorkSummary([{ ...it, state: 'blocked' }, { ...it, state: 'merged' }]);
   const sum = c.$('wbsummary').innerHTML;
   assert.ok(sum.includes('1 blocked') && sum.includes('1 merged'), 'summary counts by state');
+  c.loadWork([{ ...it, id: 8, state: 'queued', title: 'active item' }, { ...it, id: 9, state: 'merged', title: 'completed item' }]);
+  assert.ok(c.$('wboard').innerHTML.includes('active item'), 'active work is shown by default');
+  assert.ok(!c.$('wboard').innerHTML.includes('completed item'), 'merged work is hidden by default');
+  c.$('showCompleted').checked = true;
+  c.loadWork([{ ...it, id: 9, state: 'merged', title: 'completed item' }]);
+  assert.ok(c.$('wboard').innerHTML.includes('completed item'), 'completed history remains available on demand');
 }
 
 // ---- mention autocomplete ------------------------------------------------------------------------
@@ -149,3 +164,4 @@ const escapedOnly = (out, where) => {
 }
 
 console.log('✅ console-render.test: all assertions passed (escaping in every render path incl. datalist, exactly-once, mention-chip boundaries, id-ordered insertion + grouping, fallback glyph)');
+
