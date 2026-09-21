@@ -30,7 +30,7 @@
   *{box-sizing:border-box} html,body{margin:0;height:100%}
   [hidden]{display:none!important}
   body{background:var(--bg);color:var(--fg);font:13px/1.45 var(--sans);height:100vh;display:grid;
-       grid-template-rows:40px auto minmax(0,1fr);grid-template-columns:260px minmax(0,1fr) 0;
+       grid-template-rows:40px auto minmax(0,1fr);grid-template-columns:280px minmax(0,1fr) 0;
        grid-template-areas:"top top top" "attn attn attn" "left main right"}
   body.board-on{grid-template-columns:260px minmax(0,1fr) 380px}
   svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
@@ -53,6 +53,10 @@
   .top{grid-area:top;display:flex;align-items:center;gap:10px;padding:0 12px;background:var(--card);border-bottom:1px solid var(--line);min-width:0}
   .brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;letter-spacing:.01em;flex:none}
   .brand .mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--accent),var(--hand));display:grid;place-items:center;color:var(--on-accent)}
+  .nav{display:flex;align-items:center;gap:2px;height:100%}
+  .nav button{height:28px;padding:0 9px;border:0;border-radius:5px;background:transparent;color:var(--quiet);font-weight:550}
+  .nav button:hover,.nav button.on{background:var(--muted);color:var(--fg)}
+  .nav .badge{display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 4px;margin-left:4px;border-radius:9px;background:var(--bad);color:#fff;font:11px/1 var(--mono)}
   .chip{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font-family:var(--mono);font-size:12px;color:var(--quiet);transition:border-color .15s;min-width:0;max-width:52vw}
   .chip:hover{border-color:var(--line-strong)}
   .chip #chipinfo{color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -88,6 +92,7 @@
   #settings input[type=checkbox]:checked{background:var(--accent)} #settings input[type=checkbox]:checked::after{transform:translateX(14px)}
   #settings .note{color:var(--faint);line-height:1.4}
   #settings .unit{display:inline-flex;align-items:center;gap:4px;color:var(--quiet)}
+  #statusdiag{padding:7px 8px;border-radius:5px;background:var(--bg);color:var(--quiet);font-family:var(--mono);overflow-wrap:anywhere}
 
   /* ---- attention strip (unacked handoffs) ------------------------------------------- */
   .attn{grid-area:attn;display:none}
@@ -104,7 +109,8 @@
   /* ---- rails ------------------------------------------------------------------------ */
   .rail{background:var(--card);overflow-y:auto;min-height:0;display:flex;flex-direction:column}
   .left{grid-area:left;border-right:1px solid var(--line);overflow:hidden}
-  .left .sec{min-height:0;overflow-y:auto} .left .sec.fleet{flex:0 1 auto;max-height:60%} .left .sec.chans{flex:1 1 auto;border-top:1px solid var(--line)}
+  .left .sec{min-height:0;overflow-y:auto} .left .sec.fleet{flex:0 1 auto;max-height:60%;display:none} .left.fleet-on .sec.fleet{display:block}.left .sec.chans{flex:1 1 auto}
+  .left.fleet-on .sec.chans{border-top:1px solid var(--line)}
   .left .sec h2{position:sticky;top:0;background:var(--card);z-index:1;padding-top:2px;padding-bottom:2px;margin:0 0 2px}
   #boardpanel{grid-area:right;border-left:1px solid var(--line);display:none}
   body.board-on #boardpanel{display:flex}
@@ -130,6 +136,9 @@
   .chan .newdot{grid-column:1;width:7px;height:7px;border-radius:50%;background:var(--warn);animation:pulse 2s ease-out 3}
   @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--warn) 55%,transparent)}100%{box-shadow:0 0 0 7px transparent}}
   .chan.newc .n{color:var(--warn)}
+  .chan.attention{min-height:38px;margin-bottom:5px;border:1px solid color-mix(in srgb,var(--bad) 35%,var(--line));background:color-mix(in srgb,var(--bad) 8%,transparent)}
+  .chan.attention.sel{border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent)}
+  .chan .unread{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:var(--on-accent);font:11px/1 var(--mono)}
   .more,.empty{padding:6px 8px;font-size:12px;color:var(--faint)}
 
   /* ---- centre: toolbar + stream + composer ----------------------------------------- */
@@ -138,6 +147,7 @@
   .tb #streamtitle{font-family:var(--mono);font-size:14px;color:var(--fg)}
   .tb .hint{margin-left:auto;font-size:12px;color:var(--faint)}
   #stream{overflow-y:auto;padding:8px 12px 12px;display:flex;flex-direction:column;gap:1px}
+  #stream.attention-empty::after{content:"You're caught up — nothing needs you.";margin:auto;color:var(--quiet);font-size:14px}
   .msg{display:grid;grid-template-columns:60px minmax(0,1fr);column-gap:8px;padding:3px 6px;border-radius:4px;border-left:2px solid transparent;transition:background .15s}
   .msg:hover{background:color-mix(in srgb,var(--muted) 60%,transparent)}
   .msg .t{font-family:var(--mono);font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums;padding-top:2px}
@@ -145,6 +155,14 @@
   .msg .from{font-weight:600;font-size:13px}
   .msg .ch{font-family:var(--mono);font-size:12px;color:var(--faint)}
   .msg .body{grid-column:2/3;font-size:13px;color:var(--fg);white-space:pre-wrap;word-break:break-word;max-width:90ch}
+  .msg.collapsed .body{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;max-height:3em}
+  .msg .actions{grid-column:2/3;display:flex;gap:5px;min-height:0;margin-top:2px;opacity:0;transition:opacity .15s}
+  .msg:hover .actions,.msg:focus-within .actions{opacity:1}
+  .msg .ma{height:22px;padding:0 7px;border:1px solid var(--line);border-radius:4px;background:transparent;color:var(--quiet);font-size:12px}
+  .msg .ma:hover{background:var(--muted);color:var(--fg)}
+  .msg.first-unread{margin-top:18px;border-top:1px solid var(--bad);border-radius:0 0 4px 4px;position:relative}
+  .msg.first-unread::before{content:"Unread";position:absolute;right:8px;top:-10px;padding:0 5px;background:var(--bg);color:var(--bad);font:11px/18px var(--mono)}
+  .msg.kfocus{outline:2px solid var(--accent);outline-offset:-2px}
   .msg.mine{background:color-mix(in srgb,var(--accent) 6%,transparent)}
   .msg.handoff{border-left-color:var(--hand);background:color-mix(in srgb,var(--hand) 6%,transparent)}
   .msg.tome{border-left-color:var(--accent)}
@@ -174,6 +192,8 @@
 
   /* ---- stream toolbar filters, grouping, mention chips, new-messages pill ---------- */
   .tb{gap:6px}
+  #search{width:150px;height:24px;padding:0 8px;border:1px solid var(--line);border-radius:12px;background:var(--bg);font-size:12px}
+  #savedFilters{height:24px;max-width:120px;border:1px solid var(--line);border-radius:5px;background:var(--bg);font-size:12px}
   .fc{flex:none;height:22px;padding:0 8px;border:1px solid var(--line);border-radius:11px;background:transparent;font-size:12px;color:var(--quiet);display:inline-flex;align-items:center;gap:4px;white-space:nowrap;transition:background .15s,color .15s,border-color .15s}
   .fc:hover{background:var(--muted);color:var(--fg)}
   .fc.on{background:color-mix(in srgb,var(--accent) 18%,transparent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);color:var(--fg)}
@@ -224,7 +244,7 @@
   .wb-tag{padding:0 4px;border-radius:3px;background:var(--muted);color:var(--quiet)}
   .wb-tag.wb-ref{color:var(--accent)}
 
-  @media (max-width:1100px){ body.board-on{grid-template-columns:240px minmax(0,1fr) 0} body.board-on #boardpanel{display:none} }
+  @media (max-width:1100px){ body.board-on{grid-template-columns:240px minmax(0,1fr) 0} body.board-on #boardpanel{display:none} .nav button{padding:0 6px} }
   @media (max-width:760px){ body,body.board-on{grid-template-columns:200px minmax(0,1fr) 0} .chip{max-width:40vw} .tb .hint{display:none} footer .field.fch{width:120px} }
 </style>
 </head>
@@ -255,8 +275,14 @@
 
 <header class="top">
   <div class="brand"><span class="mark"><svg class="i s"><use href="#i-zap"/></svg></span>Crosstalk</div>
+  <nav class="nav" aria-label="Console views">
+    <button id="inboxTab" class="on">Inbox <span class="badge" id="inboxCount" hidden>0</span></button>
+    <button id="activityTab">Activity</button>
+    <button id="boardTab">Board</button>
+    <button id="fleetTab">Fleet</button>
+  </nav>
   <button class="chip" id="chip" title="Connection status. Click to change bus, token or identity.">
-    <span class="dot" id="dot"></span><span id="chipinfo">not connected</span><span class="sep">·</span><span id="meta">idle</span>
+    <span class="dot" id="dot"></span><span id="chipinfo">Not connected</span><span id="meta" hidden>idle</span>
   </button>
   <div id="connform">
     <label for="base">bus</label><input id="base" placeholder="http://localhost:8787" />
@@ -279,29 +305,33 @@
   <label title="Show every channel, including those outside the active window.">Show all channels <input id="showAllChans" type="checkbox" /></label>
   <label title="Show every participant, including those outside the active window.">Show all participants <input id="showAllParts" type="checkbox" /></label>
   <label title="Show the read-only work board panel on the right, grouped by epic.">Work board <input id="showBoard" type="checkbox" /></label>
+  <label title="Include merged and deployed history in the board.">Show completed work <input id="showCompleted" type="checkbox" /></label>
   <h3>Alerts</h3>
   <label title="Desktop notification for a handoff or an @mention of you while this tab is not in front. The card shows the sender, the channel and the first 160 characters of the message on your OS notification surface; a burst (e.g. after a reconnect) is folded into one card.">Notify on handoff / @me <input id="notify" type="checkbox" /></label>
   <h3>Discovery</h3>
   <label title="Extra hosts to probe when following a moved leader (comma-separated host or host:port). The roster's own hosts are probed automatically, so this is usually only needed to seed discovery before the first connect.">Peer seeds <input id="peers" type="text" placeholder="host1, host2:8787" /></label>
   <div class="note">Roster hosts are probed automatically; seeds only matter before the first connect. The leader is followed by highest election epoch.</div>
   <div class="note" id="wininfo"></div>
+  <h3>Diagnostics</h3>
+  <div id="statusdiag">Disconnected</div>
 </div>
 
 <section class="attn" id="ackbanner" aria-label="Handoffs needing acknowledgement"></section>
 
-<aside class="rail left">
+<aside class="rail left" id="leftrail">
   <div class="sec fleet">
     <h2><svg class="i s"><use href="#i-users"/></svg>Fleet <span class="cnt" id="rcount"></span></h2>
     <div id="roster"><div class="empty">—</div></div>
   </div>
   <div class="sec chans">
-    <h2><svg class="i s"><use href="#i-hash"/></svg>Channels <span class="cnt" id="ccount"></span></h2>
+    <h2><svg class="i s"><use href="#i-hash"/></svg>Conversations <span class="cnt" id="ccount"></span></h2>
     <div id="channels"></div>
   </div>
 </aside>
 
 <div class="center">
-  <div class="tb"><span id="streamtitle">all channels</span>
+  <div class="tb"><span id="streamtitle">Attention</span>
+    <button class="fc on" id="attentionFilter" title="Unread messages that need an operator response">Attention</button>
     <span id="typefilters" role="group" aria-label="Filter by message type">
       <button class="fc on" data-t="">all</button>
       <button class="fc t-handoff" data-t="handoff"><span class="k"></span><span>handoff</span></button>
@@ -313,6 +343,9 @@
     <button class="fc" id="mefilter" title="Only messages that mention me" aria-pressed="false">@me</button>
     <button class="fc x" id="senderfilter" hidden title="Click to clear the sender filter"></button>
     <span class="sp"></span>
+    <input id="search" type="search" placeholder="Search  /" aria-label="Search messages" />
+    <select id="savedFilters" aria-label="Saved filters" hidden><option value="">Saved views</option></select>
+    <button class="fc" id="saveFilter" title="Save the current inbox filters">Save view</button>
     <span class="paused" id="paused" hidden><svg class="i s"><use href="#i-pause"/></svg>paused · scrolled up</span>
   </div>
   <main id="stream"><div class="sys">Enter the bus token (CC_TOKEN from ~/.claude/.crosstalk) and click Connect. Messages stream here.</div></main>
@@ -323,7 +356,7 @@
       <label class="field fch"><svg class="i s"><use href="#i-hash"/></svg><input id="chan" list="chanlist" placeholder="channel" value="general" aria-label="channel" /></label>
       <datalist id="chanlist"></datalist>
       <label class="field fty"><select id="type" aria-label="message type">
-        <option>message</option><option selected>status</option><option>request</option>
+        <option selected>message</option><option>status</option><option>request</option>
         <option>response</option><option>handoff</option><option>done</option>
       </select></label>
       <label class="field fbody"><input id="body" placeholder="message… (Enter to send · @ to mention)" autocomplete="off" aria-label="message" /></label>
@@ -359,9 +392,11 @@
   $('showAllParts').checked = cfg.showAllParts ?? !!cfg.showAll;
   $('showAllChans').checked = cfg.showAllChans ?? !!cfg.showAll;
   $('peers').value = cfg.peers || '';
-  // Work board is ON by default — the PO watches the board next to the chat. Persisted per-browser.
-  $('showBoard').checked = cfg.boardOn ?? true;
-  $('notify').checked = !!cfg.notify;
+  // Conversation space is the landing surface; operator drawers stay out of the way until asked.
+  $('showBoard').checked = cfg.boardOn ?? false;
+  $('showCompleted').checked = cfg.showCompleted ?? false;
+  // Alerting is opt-out. Browsers still require an explicit gesture before permission can be granted.
+  $('notify').checked = cfg.notify ?? true;
   document.body.classList.toggle('board-on', $('showBoard').checked);
 
   let cursors = {};          // per-channel last_id seen (for message fetch)
@@ -373,6 +408,8 @@
   let msgLog = [];           // every message object seen (for handoff/ack logic)
   let instances = [];        // last roster
   let viewedAt = JSON.parse(localStorage.getItem(LS + '.viewed') || '{}'); // channel -> last_message_at we've looked at
+  let readThrough = JSON.parse(localStorage.getItem(LS + '.read') || '{}'); // channel -> highest message id read
+  const freshReadState = Object.keys(readThrough).length === 0;
   let firstChannels = true;  // don't flag everything as "new" on first load
   let ok = false, timer = null, hbTimer = null, pollFails = 0;
   let leaderRev = null;      // running-code rev of the current bus leader (from /cc/whoami)
@@ -380,7 +417,7 @@
                              // follower/viewer, so it echoes this on every request to pass the version gate
   let ws = null, wsOpen = false, wsFirehose = false, wsTimer = null, wsBackoff = 2000, needBackfill = true; // push transport
   let pollN = 0;             // poll counter: with push up, the per-channel REST sweep runs every 4th tick
-  let typeFilter = null, senderFilter = null, meOnly = false;                            // stream filters
+  let typeFilter = null, senderFilter = null, meOnly = false, attentionMode = true, searchQuery = ''; // stream filters
   let unseen = 0;            // messages appended while the operator is scrolled up
 
   const pad = (n) => String(n).padStart(2, '0');
@@ -394,8 +431,9 @@
   const partWin = () => Math.max(1, Number($('partWin').value) || 15) * 60000;
   const showAllParts = () => $('showAllParts').checked;
   const showAllChans = () => $('showAllChans').checked;
-  const save = () => localStorage.setItem(LS, JSON.stringify({ base: $('base').value.trim(), token: $('token').value, me: $('me').value.trim(), chanWin: Number($('chanWin').value)||15, partWin: Number($('partWin').value)||15, showAllParts: showAllParts(), showAllChans: showAllChans(), peers: $('peers').value.trim(), boardOn: $('showBoard').checked, notify: $('notify').checked }));
+  const save = () => localStorage.setItem(LS, JSON.stringify({ base: $('base').value.trim(), token: $('token').value, me: $('me').value.trim(), chanWin: Number($('chanWin').value)||15, partWin: Number($('partWin').value)||15, showAllParts: showAllParts(), showAllChans: showAllChans(), peers: $('peers').value.trim(), boardOn: $('showBoard').checked, showCompleted: $('showCompleted').checked, notify: $('notify').checked }));
   const saveViewed = () => localStorage.setItem(LS + '.viewed', JSON.stringify(viewedAt));
+  const saveRead = () => localStorage.setItem(LS + '.read', JSON.stringify(readThrough));
   const base = () => $('base').value.trim().replace(/\/$/, '');
   // Echo the leader's own version so the console (a viewer that follows the leader) passes the fleet
   // version gate on every /api call. Before the first whoami resolves leaderVersion is null → the call
@@ -457,7 +495,10 @@
     ok = on; $('dot').className = 'dot ' + (on ? 'on' : 'off'); $('meta').textContent = note || (on ? 'live' : 'error'); $('send').disabled = !on;
     document.body.classList.toggle('connected', on);
     const lc = readLeaderCache();
-    $('chipinfo').textContent = (on && lc) ? `${lc.host} · epoch ${lc.epoch}${leaderRev ? ' · rev ' + leaderRev : ''}` : (base() || 'not connected');
+    $('chipinfo').textContent = on ? 'Connected · healthy' : 'Disconnected';
+    $('statusdiag').textContent = on
+      ? `${lc ? lc.host : base()} · ${note || 'live'}${lc ? ' · epoch ' + lc.epoch : ''}${leaderRev ? ' · rev ' + leaderRev : ''}`
+      : `${base() || 'No bus URL'} · ${note || 'error'}`;
     if (on && !formPinned) $('connform').hidden = true;
   }
   let toastTimer = null;
@@ -469,6 +510,14 @@
   const linkMentions = (html) => html.replace(/@([A-Za-z0-9._\/-]+)/g, (whole, id) =>
     `<span class="at${(id === me() || BROADCAST.has(id)) ? ' me' : ''}">${whole}</span>`);
   const GROUP_MS = 5 * 60000; // consecutive messages from one sender in one channel within this gap share a header
+  const isUnreadMessage = (m) => m.sender !== me() && Number(m.id) > Number(readThrough[m.channel] || 0) &&
+    (!freshReadState || tms(m.created_at) >= Date.now() - 24 * 3600 * 1000);
+  const needsAttention = (m) => {
+    const text = String(m.content || '');
+    const addressed = text.includes('@' + me()) || String(m.channel || '').startsWith('dm-');
+    const actionable = ['message','request','handoff'].includes(m.message_type) || /\b(fail(?:ed|ure)?|error|blocked|urgent)\b/i.test(text);
+    return isUnreadMessage(m) && (addressed || actionable);
+  };
   const isVisible = (el) => el.style.display !== 'none';
   const sameThread = (a, b) => a && b && a.sender === b.sender && a.channel === b.channel;
   const prevVisibleRow = (el) => { let p = el.previousElementSibling; while (p && !(p._m && isVisible(p))) p = p.previousElementSibling; return p; };
@@ -483,15 +532,20 @@
     //  because the poll cursor + seenIds have already consumed them and won't re-fetch.)
     const el = document.createElement('div');
     const toMe = (m.content || '').includes('@' + me());
-    el.className = 'msg' + (m.sender === me() ? ' mine' : '') + (m.message_type === 'handoff' ? ' handoff' : '') + (toMe ? ' tome' : '');
+    const long = String(m.content || '').length > 220 || String(m.content || '').split('\n').length > 3;
+    el.className = 'msg' + (m.sender === me() ? ' mine' : '') + (m.message_type === 'handoff' ? ' handoff' : '') + (toMe ? ' tome' : '') + (long ? ' collapsed' : '');
     el.dataset.ch = m.channel; el.dataset.type = m.message_type || ''; el.dataset.sender = m.sender || ''; el.dataset.tome = toMe ? '1' : '';
+    el.dataset.unread = isUnreadMessage(m) ? '1' : ''; el.dataset.attention = needsAttention(m) ? '1' : '';
     el._m = m;
     el.innerHTML =
       `<span class="t" title="${esc(m.created_at || '')} UTC">${hhmm(m.created_at)}</span>` +
       `<div class="hd"><span class="from" title="Click to filter by this sender">${esc(m.sender)}</span>` +
       `<span class="tag t-${esc(m.message_type)}">${esc(m.message_type)}</span>` +
       `<span class="ch">#${esc(m.channel)}</span></div>` +
-      `<div class="body">${linkMentions(esc(m.content))}</div>`;
+      `<div class="body">${linkMentions(esc(m.content))}</div>` +
+      `<div class="actions">${long ? '<button class="ma" data-action="expand">Expand</button>' : ''}` +
+      `<button class="ma" data-action="reply">Reply</button>` +
+      (m.sender !== me() && m.message_type === 'handoff' ? '<button class="ma" data-action="ack">Acknowledge</button>' : '') + `</div>`;
     const hidden = !passesFilters(el);
     el.style.display = hidden ? 'none' : '';
     const atBottom = atBottomNow();
@@ -504,34 +558,57 @@
     else if (!hidden) regroupRow(el);
     if (!hidden) { if (atBottom) stream.scrollTop = stream.scrollHeight; else { unseen++; showPill(); } }
     if (live && m.sender !== me() && (m.message_type === 'handoff' || toMe)) notifyOS(m);
+    if (!attentionMode && filter === m.channel) markChannelRead(m.channel);
+    updateInboxCount();
   }
 
   // ---- stream filters (channel · type · sender · @me) — display-only, applied to every row --------
   function passesFilters(el) {
     const d = el.dataset;
+    if (attentionMode && !d.attention) return false;
     if (filter && d.ch !== filter) return false;
     if (typeFilter && d.type !== typeFilter) return false;
     if (senderFilter && d.sender !== senderFilter) return false;
     if (meOnly && !d.tome) return false;
+    if (searchQuery && !`${d.sender} ${d.ch} ${el._m?.content || ''}`.toLowerCase().includes(searchQuery)) return false;
     return true;
   }
   function applyFilters() {
     let pv = null;
+    let firstUnread = true;
+    let visibleCount = 0;
     for (const el of stream.children) {
       if (!el._m) continue;   // .sys rows
       const vis = passesFilters(el);
       el.style.display = vis ? '' : 'none';
+      el.classList.remove('first-unread');
       if (!vis) continue;
+      visibleCount++;
+      if (firstUnread && el.dataset.unread) { el.classList.add('first-unread'); firstUnread = false; }
       el.classList.toggle('cont', continues(pv, el));
       pv = el;
     }
-    $('streamtitle').textContent = filter ? '#' + filter : 'all channels';
+    $('streamtitle').textContent = attentionMode ? 'Attention' : (filter ? '#' + filter : 'Activity');
+    $('attentionFilter').classList.toggle('on', attentionMode);
+    $('inboxTab').classList.toggle('on', attentionMode);
+    $('activityTab').classList.toggle('on', !attentionMode && !filter);
     [...$('typefilters').querySelectorAll('.fc')].forEach((b) => b.classList.toggle('on', (b.dataset.t || null) === typeFilter));
     $('mefilter').classList.toggle('on', meOnly); $('mefilter').setAttribute('aria-pressed', String(meOnly));
     $('senderfilter').hidden = !senderFilter;
     $('senderfilter').textContent = senderFilter ? 'from ' + shortOf(senderFilter) + ' ×' : '';
+    stream.classList.toggle('attention-empty', ok && attentionMode && visibleCount === 0);
   }
-  function clearFilters() { typeFilter = null; senderFilter = null; meOnly = false; applyFilters(); }
+  function clearFilters() { typeFilter = null; senderFilter = null; meOnly = false; searchQuery = ''; $('search').value = ''; applyFilters(); }
+  function updateInboxCount() {
+    const n = msgLog.filter(needsAttention).length;
+    $('inboxCount').textContent = n; $('inboxCount').hidden = !n;
+  }
+  function markChannelRead(channel) {
+    const ids = msgLog.filter((m) => m.channel === channel).map((m) => Number(m.id) || 0);
+    if (ids.length) readThrough[channel] = Math.max(Number(readThrough[channel] || 0), ...ids);
+    for (const el of stream.children) if (el._m && el._m.channel === channel) { el.dataset.unread = ''; el.dataset.attention = ''; }
+    saveRead(); updateInboxCount();
+  }
 
   // ---- "N new · jump to latest": never yank the operator's scroll position --------------------------
   const atBottomNow = () => stream.scrollHeight - stream.scrollTop - stream.clientHeight < 80;
@@ -618,26 +695,37 @@
       .sort((a, b) => (b.isNew - a.isNew) || (tms(b.last_message_at) - tms(a.last_message_at)));
     const inWin = rows.filter((c) => c.age <= chanWin() || c.isNew || c.name === filter);
     const show = showAllChans() ? rows : inWin;
-    $('ccount').textContent = show.length + ' / ' + rows.length;
+    const unreadFor = (name) => msgLog.filter((m) => m.channel === name && isUnreadMessage(m)).length;
+    const attentionCount = msgLog.filter(needsAttention).length;
+    $('ccount').textContent = attentionCount ? attentionCount + ' unread' : 'clear';
     // The compose-channel dropdown mirrors the VISIBLE channel list (same active-window /
     // "show all" filter as the sidebar). Fallback: when nothing is visible (all channels are
     // outside the active window and "show all channels" is off), offer every channel so the
     // dropdown is never uselessly empty.
     const dlSource = show.length ? show : rows;
     chanList.innerHTML = dlSource.map((c) => `<option value="${esc(c.name)}">`).join('');
-    const allRow = `<div class="chan ${filter===null?'sel':''}" data-ch="">${ICON('layers')}<span class="n">all channels</span><span class="c">${rows.reduce((s, c) => s + (c.message_count || 0), 0)}</span></div>`;
-    chansEl.innerHTML = allRow + show.map((c) => {
+    const attentionRow = `<div class="chan attention ${attentionMode?'sel':''}" data-mode="attention">${ICON('alert')}<span class="n">Needs you</span><span class="unread">${attentionCount}</span></div>`;
+    const activityRow = `<div class="chan ${!attentionMode&&filter===null?'sel':''}" data-ch="">${ICON('layers')}<span class="n">Activity</span><span class="c">${rows.reduce((s, c) => s + (c.message_count || 0), 0)}</span></div>`;
+    const dmRows = show.filter((c) => c.name.startsWith('dm-'));
+    const channelRows = show.filter((c) => !c.name.startsWith('dm-'));
+    const rowHtml = (c) => {
       const off = c.age > chanWin() && !c.isNew && c.name !== filter;
+      const unread = unreadFor(c.name);
       return `<div class="chan ${filter===c.name?'sel':''} ${c.isNew?'newc':''} ${off?'offwin':''}" data-ch="${esc(c.name)}" title="#${esc(c.name)} — last message ${esc(agoTxt(c.last_message_at))}, ${c.message_count} total${c.isNew ? ', new since you last looked' : ''}">` +
         `${c.isNew ? '<span class="newdot"></span>' : ICON('hash')}<span class="n">${esc(c.name)}</span>` +
-        `<span class="c">${esc(agoShort(c.last_message_at))} · ${c.message_count}</span></div>`;
-    }).join('');
+        `<span class="c">${unread ? `<span class="unread">${unread}</span>` : esc(agoShort(c.last_message_at))}</span></div>`;
+    };
+    chansEl.innerHTML = attentionRow + activityRow +
+      (dmRows.length ? '<div class="host"><span class="hn">DMs</span></div>' + dmRows.map(rowHtml).join('') : '') +
+      (channelRows.length ? '<div class="host"><span class="hn">Channels</span></div>' + channelRows.map(rowHtml).join('') : '');
     if (!showAllChans() && rows.length > show.length) {
       chansEl.innerHTML += `<div class="more">+ ${rows.length - show.length} older · “show all channels” is in settings</div>`;
     }
     [...chansEl.querySelectorAll('.chan')].forEach((el) => el.onclick = () => {
+      if (el.dataset.mode === 'attention') { attentionMode = true; filter = null; applyFilters(); renderChannels(channels); return; }
+      attentionMode = false;
       filter = el.dataset.ch || null;
-      if (filter) { const c = channels.find((x) => x.name === filter); if (c) { viewedAt[filter] = tms(c.last_message_at); saveViewed(); } }
+      if (filter) { $('chan').value = filter; const c = channels.find((x) => x.name === filter); if (c) { viewedAt[filter] = tms(c.last_message_at); saveViewed(); } markChannelRead(filter); }
       applyFilters();
       renderChannels(channels);
     });
@@ -707,8 +795,8 @@
   // Stable id order avoids row jumping; scrollTop is preserved so a rebuild doesn't flicker/jump.
   function renderBoard() {
     const el = $('wboard');
-    const items = [...workItems.values()];
-    if (!items.length) { el.innerHTML = '<div class="empty">no work items yet</div>'; $('wbsummary').textContent = ''; return; }
+    const items = [...workItems.values()].filter((it) => $('showCompleted').checked || !['merged','deployed','abandoned'].includes(it.state));
+    if (!items.length) { el.innerHTML = '<div class="empty">no active work</div>'; $('wbsummary').textContent = ''; return; }
     const byId = new Map(items.map((i) => [i.id, i]));
     const kids = new Map(); const roots = [];
     for (const it of items) {
@@ -759,7 +847,8 @@
         if (!workCursor || (it.updated_at || '') > workCursor) workCursor = it.updated_at;
       }
       if (full || changed) renderBoard(); else refreshWorkAgos();
-      $('wbmeta').textContent = workItems.size ? ('live · ' + workItems.size) : 'no items';
+      const visibleCount = [...workItems.values()].filter((it) => $('showCompleted').checked || !['merged','deployed','abandoned'].includes(it.state)).length;
+      $('wbmeta').textContent = visibleCount ? ('live · ' + visibleCount) : 'no active items';
     } catch (e) {
       $('wbmeta').textContent = 'paused'; // leave the last-rendered board in place
     }
@@ -793,6 +882,7 @@
       if (filter) { const c = channels.find((x) => x.name === filter); if (c) viewedAt[filter] = tms(c.last_message_at); }
       renderChannels(channels);
       renderBanner();
+      applyFilters();
       firstChannels = false;
       pollFails = 0;
       setOK(true, `live · ${wsOpen && wsFirehose ? 'push' : 'poll'} · ${channels.length} ch`);
@@ -910,13 +1000,29 @@
     closeMentions(); el.focus();
   }
 
-  async function send() {
-    const content = $('body').value.trim(); if (!content || !ok) return;
+  async function postMessage(channel, content, messageType) {
+    if (!content || !ok) return false;
     try {
       await api('/api/messages', { method:'POST', headers:{'content-type':'application/json'},
-        body: JSON.stringify({ channel: $('chan').value.trim() || 'general', sender: me(), content, message_type: $('type').value }) });
-      $('body').value = ''; closeMentions(); poll();
-    } catch (e) { setOK(false, 'send failed: ' + e.message); }
+        body: JSON.stringify({ channel: channel || 'general', sender: me(), content, message_type: messageType || 'message' }) });
+      return true;
+    } catch (e) { setOK(false, 'send failed: ' + e.message); return false; }
+  }
+  async function send() {
+    const content = $('body').value.trim(); if (!content) return;
+    const channel = $('chan').value.trim() || 'general';
+    if (await postMessage(channel, content, $('type').value)) {
+      $('body').value = ''; closeMentions(); markChannelRead(channel); poll();
+    }
+  }
+  function primeReply(m) {
+    attentionMode = false; filter = m.channel; $('chan').value = m.channel; $('type').value = 'response';
+    $('body').value = m.sender === me() ? '' : '@' + m.sender + ' ';
+    markChannelRead(m.channel); applyFilters(); $('body').focus();
+  }
+  async function acknowledge(m) {
+    const content = 'ACK @' + m.sender;
+    if (await postMessage(m.channel, content, 'response')) { markChannelRead(m.channel); toast('Acknowledged ' + shortOf(m.sender)); poll(); }
   }
   $('send').onclick = send;
   $('body').addEventListener('input', openMentions);
@@ -930,12 +1036,16 @@
     if (e.key === 'Enter') send();
   });
   $('body').addEventListener('blur', () => setTimeout(closeMentions, 120));
-  $('connect').onclick = start;
+  $('connect').onclick = () => {
+    if ($('notify').checked && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+    start();
+  };
   ['base','token','me'].forEach((id) => {
     $(id).addEventListener('change', start);
     $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); start(); } });
   });
   ['chanWin','partWin','showAllParts','showAllChans'].forEach((id) => $(id).addEventListener('change', () => { save(); poll(); }));
+  $('showCompleted').addEventListener('change', () => { save(); renderBoard(); });
   $('showBoard').addEventListener('change', () => {
     document.body.classList.toggle('board-on', $('showBoard').checked);
     save();
@@ -944,9 +1054,45 @@
   $('peers').addEventListener('change', save);
   // ---- stream toolbar, sender filter, new-messages pill, keyboard --------------------------------
   $('typefilters').addEventListener('click', (e) => { const b = e.target.closest('.fc'); if (!b) return; typeFilter = b.dataset.t || null; applyFilters(); });
+  $('attentionFilter').onclick = () => { attentionMode = true; filter = null; applyFilters(); };
+  $('inboxTab').onclick = () => { attentionMode = true; filter = null; applyFilters(); };
+  $('activityTab').onclick = () => { attentionMode = false; filter = null; applyFilters(); };
+  $('fleetTab').onclick = () => { const on = $('leftrail').classList.toggle('fleet-on'); $('fleetTab').classList.toggle('on', on); };
+  $('boardTab').onclick = () => { $('showBoard').checked = !$('showBoard').checked; $('showBoard').dispatchEvent(new Event('change')); };
+  $('search').addEventListener('input', () => { searchQuery = $('search').value.trim().toLowerCase(); applyFilters(); });
+  const VIEWS_KEY = LS + '.views';
+  let savedViews = [];
+  try { savedViews = JSON.parse(localStorage.getItem(VIEWS_KEY) || '[]'); } catch {}
+  if (!Array.isArray(savedViews)) savedViews = [];
+  const renderSavedViews = () => {
+    $('savedFilters').hidden = !savedViews.length;
+    $('savedFilters').innerHTML = '<option value="">Saved views</option>' + savedViews.map((v, i) => `<option value="${i}">${esc(v.name)}</option>`).join('');
+  };
+  $('saveFilter').onclick = () => {
+    const name = (window.prompt?.('Name this view', attentionMode ? 'Attention' : (filter ? '#' + filter : 'Activity')) || '').trim();
+    if (!name) return;
+    savedViews = savedViews.filter((v) => v.name !== name);
+    savedViews.push({ name, attentionMode, filter, typeFilter, senderFilter, meOnly, searchQuery });
+    localStorage.setItem(VIEWS_KEY, JSON.stringify(savedViews)); renderSavedViews(); toast('Saved view “' + name + '”');
+  };
+  $('savedFilters').addEventListener('change', () => {
+    const v = savedViews[Number($('savedFilters').value)]; if (!v) return;
+    attentionMode = !!v.attentionMode; filter = v.filter || null; typeFilter = v.typeFilter || null;
+    senderFilter = v.senderFilter || null; meOnly = !!v.meOnly; searchQuery = v.searchQuery || '';
+    $('search').value = searchQuery; applyFilters();
+  });
+  renderSavedViews();
   $('mefilter').onclick = () => { meOnly = !meOnly; applyFilters(); };
   $('senderfilter').onclick = () => { senderFilter = null; applyFilters(); };
   stream.addEventListener('click', (e) => {
+    const action = e.target.closest('.ma');
+    if (action) {
+      const row = action.closest('.msg'); if (!row || !row._m) return;
+      if (action.dataset.action === 'expand') { row.classList.toggle('collapsed'); action.textContent = row.classList.contains('collapsed') ? 'Expand' : 'Collapse'; }
+      if (action.dataset.action === 'reply') primeReply(row._m);
+      if (action.dataset.action === 'ack') acknowledge(row._m);
+      return;
+    }
     const f = e.target.closest('.from'); if (!f) return;
     const row = f.closest('.msg'); if (!row) return;
     senderFilter = senderFilter === row.dataset.sender ? null : row.dataset.sender; applyFilters();
@@ -957,6 +1103,18 @@
     if (e.key !== 'Escape' || e.target.closest('input,select,textarea')) return;
     if (typeFilter || senderFilter || meOnly) clearFilters();
   });
+  let keyRow = -1;
+  document.addEventListener('keydown', (e) => {
+    if (e.target.closest('input,select,textarea')) return;
+    if (e.key === '/') { e.preventDefault(); $('search').focus(); return; }
+    const rows = [...stream.querySelectorAll('.msg')].filter(isVisible);
+    if ((e.key === 'j' || e.key === 'k') && rows.length) {
+      e.preventDefault(); rows.forEach((r) => r.classList.remove('kfocus'));
+      keyRow = Math.max(0, Math.min(rows.length - 1, keyRow + (e.key === 'j' ? 1 : -1)));
+      rows[keyRow].classList.add('kfocus'); rows[keyRow].scrollIntoView?.({ block:'nearest' });
+    }
+    if (e.key === 'r' && rows[keyRow]?._m) { e.preventDefault(); primeReply(rows[keyRow]._m); }
+  });
   $('notify').addEventListener('change', () => {
     save();
     if ($('notify').checked && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission();
@@ -966,7 +1124,7 @@
   $('gear').onclick = () => { const s = $('settings'); s.hidden = !s.hidden; $('gear').classList.toggle('on', !s.hidden); };
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) { $('settings').hidden = true; $('gear').classList.remove('on'); } });
   $('chip').onclick = () => { const f = $('connform'); f.hidden = !f.hidden; formPinned = !f.hidden; if (!f.hidden) $('base').focus(); };
-  const syncBoardBtn = () => $('boardBtn').classList.toggle('on', $('showBoard').checked);
+  const syncBoardBtn = () => { $('boardBtn').classList.toggle('on', $('showBoard').checked); $('boardTab').classList.toggle('on', $('showBoard').checked); };
   $('boardBtn').onclick = () => { $('showBoard').checked = !$('showBoard').checked; $('showBoard').dispatchEvent(new Event('change')); };
   $('showBoard').addEventListener('change', syncBoardBtn); syncBoardBtn();
   const THEME = LS + '.theme';
