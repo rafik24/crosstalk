@@ -28,6 +28,9 @@ const HOME = mkdtempSync(join(tmpdir(), 'ccpi-home-'));
 process.env.HOME = HOME; process.env.USERPROFILE = HOME;
 process.env.CC_BUS_CONFIG = join(tmpdir(), `cc-no-config-pi-${process.pid}`);
 process.env.CC_CACHE_DIR = mkdtempSync(join(tmpdir(), 'ccpi-cache-'));
+// loadConfig() prefers process.env over the config file, so an operator shell exporting the real
+// bus's CC_BASE/CC_TOKEN would pin test R to the PRODUCTION bus (and make its watch-fail vacuous).
+delete process.env.CC_BASE; delete process.env.CC_TOKEN; delete process.env.CC_PIN;
 
 const PORT = Number(process.env.CC_TEST_PORT || 8794);
 // ISOLATE discovery from the real fleet (which outranks a scratch server by epoch): probe only the
