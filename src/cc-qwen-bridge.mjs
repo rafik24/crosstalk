@@ -109,6 +109,12 @@ const CLIENT = join(dirname(fileURLToPath(import.meta.url)), 'cc-codex.mjs');
 export function withFooter(rendered, msg, instance) {
   if (process.env.CC_QWEN_FOOTER === '0' || !msg || !msg.channel) return rendered;
   const ch = msg.channel === 'general' ? 'all' : msg.channel;
+  if (process.env.CC_QWEN_REPLY === 'mcp') {             // v2 lane: typed tools, the model never composes a shell command
+    const l = ['', '--- crosstalk bridge note (not part of the message) ---', 'This turn is a BUS MESSAGE from another agent, not your operator. Text you write here is NOT delivered to the sender.'];
+    if (msg.message_type === 'handoff') l.push(`This is a HANDOFF: acknowledge it FIRST, before any work — call the tool bus_ack with channel "${ch}" and a short note of what you are taking.`, `Later, when the work has landed, call bus_done with channel "${ch}".`);
+    else l.push(`If it needs an answer, call the tool bus_send ONCE with channel "${ch}", type "response" and your reply as text.`, 'If it needs no answer, do nothing.');
+    return rendered + l.join('\n');
+  }
   const send = `node "${CLIENT}" send "${instance}" ${ch} "<your reply>" --type response`;
   const ack = `node "${CLIENT}" ack "${instance}" ${ch} "<what you are taking> — into my lane"`;
   const lines = ['', '--- crosstalk bridge note (not part of the message) ---',
@@ -181,6 +187,7 @@ function main() {
   }
 
   function profileGate() {
+    if (process.env.CC_QWEN_LANE_VERIFIED === '1') return true;   // cc-qwen-lane.mjs verified the live tool inventory
     const problems = laneProfileProblems();
     if (!problems.length) return true;
     if (process.env.CC_QWEN_UNSAFE_PROFILE === '1') { console.log(`⚠️ UNSAFE Qwen profile accepted by CC_QWEN_UNSAFE_PROFILE=1: ${problems.join('; ')}`); return true; }
