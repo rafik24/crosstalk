@@ -375,6 +375,122 @@ async function main() {
     console.log('server.test: PASS (refuse-run-open M1)');
   }
 
+  // ---- Empty CC_BIND must mean loopback, never "all interfaces" (issue 45) -------
+  {
+    // `CC_BIND=` exported EMPTY is not nullish: with `??` it reached listen(port, '') and bound
+    // every interface while the README promises a loopback default. The listening socket's own
+    // address is the evidence — not the config object.
+    const saved = process.env.CC_BIND;
+    process.env.CC_BIND = '';
+    const app = await startServer({
+      port: 8824, apiKey: 'k', host: 'x', epoch: 1,
+      createDB: createStubDB, createRestRouter: createStubRouter, log: () => {},
+    });
+    try {
+      const addr = app.server.address();
+      assert.equal(addr.address, '127.0.0.1', `empty CC_BIND binds loopback only (bound ${addr.address})`);
+      assert.equal(app.config.bind, '127.0.0.1', 'the banner/config report the effective bind');
+    } finally {
+      await app.close();
+      if (saved === undefined) delete process.env.CC_BIND; else process.env.CC_BIND = saved;
+    }
+    console.log('server.test: PASS (empty CC_BIND → loopback, issue 45)');
+  }
+
+  // ---- Drain stepdown (issue 43): the guarantees, in-process with a SLOW write ---------------
+  // The point of a drain is one sentence: no write is acknowledged yet missing from the snapshot
+  // that releases the leader. That hinges on the in-flight counter — a snapshot taken while a write
+  // that passed the guard is still running is NOT final. A slow stub route makes that window wide
+  // enough to stand in.
+  {
+    const ADMIN = 'admin-drain-xyz';
+    const slowRouter = (db) => {
+      const r = createStubRouter(db);
+      const wrapped = express.Router();
+      wrapped.post('/slow', async (_req, res) => { await new Promise((z) => setTimeout(z, 1500)); res.json({ ok: true }); });
+      wrapped.use(r);
+      return wrapped;
+    };
+    const mk = (port) => startServer({
+      port, apiKey: TOKEN, adminKey: ADMIN, host: 'x', epoch: 1, backend: 'sqlite',
+      createDB: () => { const d = createStubDB(); d.snapshot = async (tmp) => fs.writeFileSync(tmp, Buffer.from('STUBDB')); return d; },
+      createRestRouter: slowRouter, log: () => {},
+    });
+    const chat = { Authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    const admin = { Authorization: `Bearer ${ADMIN}` };
+    const up = async (B) => { try { return (await fetch(`${B}/cc/whoami`, { signal: AbortSignal.timeout(800) })).ok; } catch { return false; } };
+
+    // (1) the full sequence
+    let app = await mk(8826);
+    let B = 'http://127.0.0.1:8826';
+    try {
+      let r = await fetch(`${B}/cc/stepdown?drain=1`, { method: 'POST', headers: chat });
+      assert.equal(r.status, 401, 'a chat token cannot start a drain');
+      r = await fetch(`${B}/cc/stepdown?drain=1`, { method: 'POST', headers: admin });
+      // …and with NO replica having pulled, there is nobody to drain for: it must not go read-only.
+      assert.equal((await r.json()).draining, false, 'no replica has pulled → the leader does not drain (plain stepdown)');
+    } finally { await app.close(); }
+
+    app = await mk(8827); B = 'http://127.0.0.1:8827';   // a fresh port per instance: undici would re-use a pooled socket to the one that just closed
+    try {
+      let r = await fetch(`${B}/cc/export`, { headers: admin });            // a replica exists
+      assert.equal(r.status, 200); assert.equal(r.headers.get('x-cc-draining'), null, 'no draining header outside a drain');
+      await r.arrayBuffer();
+      const slow = fetch(`${B}/api/slow`, { method: 'POST', headers: chat, body: '{}' }).catch((e) => ({ status: 0, error: e }));   // a write IN FLIGHT… (caught: if the leader leaves early this must be an assertion, not a crash)
+      await new Promise((z) => setTimeout(z, 200));
+      r = await fetch(`${B}/cc/stepdown?drain=1`, { method: 'POST', headers: admin });      // …when the drain starts
+      const started = await r.json();
+      assert.equal(started.draining, true, 'a recent replica pull → the leader drains');
+      assert.equal((await (await fetch(`${B}/cc/whoami`)).json()).draining, true, 'whoami advertises the drain');
+      r = await fetch(`${B}/api/work`, { method: 'POST', headers: chat, body: JSON.stringify({ title: 'during drain' }) });
+      assert.equal(r.status, 503, 'a NEW write during the drain is refused');
+      assert.equal((await r.json()).reason, 'draining'); assert.ok(r.headers.get('retry-after'), 'with a Retry-After');
+      assert.equal((await fetch(`${B}/api/instances`, { headers: chat })).status, 200, 'reads still work during the drain');
+      // A pull NOW — while that earlier write has not finished — must NOT release the leader.
+      r = await fetch(`${B}/cc/export`, { headers: admin });
+      assert.equal(r.headers.get('x-cc-draining'), '1', 'export during the drain carries x-cc-draining');
+      await r.arrayBuffer();
+      await new Promise((z) => setTimeout(z, 400));
+      assert.ok(await up(B), 'a snapshot taken with a write still in flight is NOT final — the leader stays');
+      assert.equal((await slow).status, 200, 'the in-flight write is acknowledged');
+      // The next pull sees zero in-flight writes → final → the leader leaves.
+      await (await fetch(`${B}/cc/export`, { headers: admin })).arrayBuffer();
+      let gone = false;
+      for (let i = 0; i < 30 && !gone; i++) { await new Promise((z) => setTimeout(z, 100)); gone = !(await up(B)); }
+      assert.ok(gone, 'a snapshot taken with nothing in flight IS final — the leader left');
+    } finally { await app.close(); }
+
+    // (1b) a PLAIN stepdown during a drain ends it now (it used to answer ok and do nothing)
+    app = await mk(8829); B = 'http://127.0.0.1:8829';
+    try {
+      await (await fetch(`${B}/cc/export`, { headers: admin })).arrayBuffer();
+      await fetch(`${B}/cc/stepdown?drain=1`, { method: 'POST', headers: admin });
+      const r = await fetch(`${B}/cc/stepdown`, { method: 'POST', headers: admin });
+      assert.equal((await r.json()).ended_drain, true, 'a plain stepdown during a drain says it ended the drain');
+      let gone = false;
+      for (let i = 0; i < 30 && !gone; i++) { await new Promise((z) => setTimeout(z, 100)); gone = !(await up(B)); }
+      assert.ok(gone, '…and the leader really left (well before the 20s deadline)');
+    } finally { await app.close(); }
+
+    // (2) the deadline: a replica that never comes back must not hold the bus read-only for ever
+    const savedDrain = process.env.CC_DRAIN_MS;
+    process.env.CC_DRAIN_MS = '700';
+    app = await mk(8828); B = 'http://127.0.0.1:8828';
+    try {
+      await (await fetch(`${B}/cc/export`, { headers: admin })).arrayBuffer();
+      const r = await fetch(`${B}/cc/stepdown?drain=1`, { method: 'POST', headers: admin });
+      assert.equal((await r.json()).deadline_ms, 700, 'CC_DRAIN_MS is honoured');
+      assert.ok(await up(B), 'still up inside the deadline');
+      let gone = false;
+      for (let i = 0; i < 40 && !gone; i++) { await new Promise((z) => setTimeout(z, 100)); gone = !(await up(B)); }
+      assert.ok(gone, 'the drain deadline ends the term when no replica pulls');
+    } finally {
+      await app.close();
+      if (savedDrain === undefined) delete process.env.CC_DRAIN_MS; else process.env.CC_DRAIN_MS = savedDrain;
+    }
+    console.log('server.test: PASS (drain stepdown: admin-only, no-replica degrade, in-flight write blocks the final pull, 503+Retry-After, deadline)');
+  }
+
   // ---- Admin scope (H2): export/stepdown reject the chat token when CC_ADMIN_KEY set ----
   {
     const ADMIN = 'admin-secret-xyz';

@@ -40,6 +40,8 @@ const RETRY_MS = Number(process.env.CC_RETRY_MS || 5000);           // first re-
 const RETRY_MAX_MS = 60000;
 export const RETRY_MAX_ATTEMPTS = Number(process.env.CC_RETRY_MAX_ATTEMPTS || 5);   // then PARK it
 const MAX_BACKOFF = 15000;
+const HELD_CAP = 2000;   // live frames parked while a term change is being reconciled
+const SEEN_CAP = 500;   // per-channel memory of seen (id → signature) for the rewind check (issue 46)
 
 export function createReceiver(opts) {
   const {
@@ -60,9 +62,33 @@ export function createReceiver(opts) {
   const LIVE_FILE = beaconPath(instance);
   let BASE = null;
 
+  // The leader's TERM. A new term may have REWOUND history (issue 46): after an unclean failover
+  // the promoted node serves its last replicated snapshot, so the newest messages of the old term
+  // are gone and their ids get RE-ISSUED. Our cursors still sit above them — every re-issued id
+  // would be discarded as "already seen", silently. A term change therefore schedules a
+  // reconciliation (see reconcileTerm) before the next backfill.
+  let leaderEpoch = null, termChanged = false, termSeq = 0;
+  // From the moment a term change is noticed until its reconciliation has finished, live frames
+  // are HELD, not judged: judged against the stale cursor a re-issued id would be dropped for
+  // good, and judged mid-reconcile a newer one would be delivered twice (once by the push, once
+  // by the reconcile's own fetch). They are replayed through consider() afterwards.
+  let reconciling = false;
+  let pendingReconcile = null;   // channels whose check failed and must be retried
+  let retryTimerR = null;        // the single pending reconcile retry (never one per poll tick)
+  const held = [];
+
   async function ensureBase(full = false) {
     const leader = full ? await resolveFull({ pin, token }) : await resolveFast({ pin, token });
     if (leader && leader.base !== BASE) { BASE = leader.base; log(`[bus leader → ${leader.host} epoch=${leader.epoch} @ ${BASE}]`); }
+    if (leader && typeof leader.epoch === 'number') {
+      if (leaderEpoch !== null && leader.epoch !== leaderEpoch && seeded) {
+        termChanged = true; reconciling = true; termSeq++;
+        // Whatever path noticed it, make sure a backfill (which runs the reconcile and releases
+        // the held frames) actually follows — a live socket schedules none by itself.
+        const t = setTimeout(() => backfill().catch(() => {}), 50); t.unref?.();
+      }
+      leaderEpoch = leader.epoch;
+    }
     return BASE;
   }
 
@@ -114,6 +140,16 @@ export function createReceiver(opts) {
   // --- cursors + dedup ---
   const cursors = {};
   let seeded = false;
+  // What we have already SEEN, per channel: id → signature, newest SEEN_CAP. The cursor alone says
+  // "I saw id 7"; the signature says WHICH message id 7 was — the only way to tell a re-issued id
+  // from a replay after the history was rewound.
+  const seen = {};
+  const sigOf = (m) => `${m.sender}|${m.created_at}|${(m.content || '').length}|${(m.content || '').slice(0, 48)}`;
+  function remember(m) {
+    const s = (seen[m.channel] ??= new Map());
+    s.delete(m.id); s.set(m.id, sigOf(m));
+    while (s.size > SEEN_CAP) s.delete(s.keys().next().value);
+  }
 
   // --- direct retry queue for failed emits (the cursor is NEVER rolled back) ---
   const retryQ = new Map();          // key `${channel}#${id}` → { msg, rendered, attempts }
@@ -169,21 +205,87 @@ export function createReceiver(opts) {
   // above, never by re-fetching.
   function consider(msg) {
     if (stopped) return;
+    if (reconciling) { if (held.length < HELD_CAP) held.push(msg); return; }   // (beyond the cap the reconcile's own fetch recovers them)
     const ch = msg.channel;
     if (only && ch !== only) return;          // --channel scope applies to PUSH frames too, not just backfill
     const cur = cursors[ch] ?? 0;
     if (msg.id <= cur) return;
     cursors[ch] = Math.max(cur, msg.id);
+    admit(msg);
+  }
+  // Remember + maybe deliver, with NO cursor test (reconcileTerm feeds re-issued ids through here).
+  function admit(msg) {
+    remember(msg);
     if (msg.sender === instance) return;       // never echo my own
     const addressed = addressedTo(msg, instance);
     if (!firehose && !addressed) return;       // ambient, not for me → don't wake
     deliver(renderLine(msg, instance, addressed), msg);
   }
 
+  // A new term began: check every channel we track against what we remember. Where the server's
+  // copy of an id we saw is now a DIFFERENT message — or our newest seen id is simply gone — the
+  // history was rewound: deliver what is new to us and pull the cursor back so the next ids are
+  // not discarded. "New to us" is decided by SIGNATURE, never by the cursor, so nothing is
+  // delivered twice; a loss-free handover (drain stepdown) matches everywhere and changes nothing.
+  // → the channels that could not be checked (a transient error): the caller retries those.
+  async function reconcileTerm(channels) {
+    const failed = [];
+    for (const ch of channels) {
+      const s = seen[ch];
+      const cur = cursors[ch] ?? 0;
+      if (!cur) continue;
+      const oldest = s && s.size ? Math.min(...s.keys()) : 0;
+      let res;
+      try { res = await j(`/api/messages/${encodeURIComponent(ch)}?after_id=${Math.max(0, oldest - 1)}`); } catch { failed.push(ch); continue; }
+      let msgs = res.messages.sort((a, b) => a.id - b.id);
+      const known = (m) => s?.get(m.id) === sigOf(m);
+      if (msgs.some((m) => m.id === cur && known(m)) && msgs.every((m) => m.id > cur || known(m))) continue;   // intact
+      // The rewind went below everything we remember (or we remember nothing): ids under `oldest`
+      // may have been re-issued too. Look at the whole channel, but only at messages written after
+      // the newest one we ever saw — a new term's messages are, by construction, later than that.
+      // The cursor goes to the channel's REAL tip — never to the tip of a filtered list: with
+      // nothing new written yet that list is empty, and a cursor of 0 made the ordinary backfill
+      // replay the whole surviving channel to every receiver at once (reviewer repro: 90 old
+      // messages re-delivered).
+      let tip = msgs.length ? msgs[msgs.length - 1].id : null;
+      if (!msgs.some(known)) {
+        const newestSeen = s && s.size ? [...s.values()].map((v) => v.split('|')[1]).sort().pop() : '';
+        try { res = await j(`/api/messages/${encodeURIComponent(ch)}?after_id=0`); } catch { failed.push(ch); continue; }
+        const all = res.messages.sort((a, b) => a.id - b.id);
+        tip = all.length ? all[all.length - 1].id : 0;
+        // STRICTLY later: surviving old messages written in the same second as the newest one we
+        // saw must not pass as new (a failover takes seconds, so a new term's messages are later).
+        msgs = all.filter((m) => String(m.created_at) > newestSeen);
+      }
+      const fresh = msgs.filter((m) => !known(m));
+      const newTip = tip ?? 0;
+      log(`[history REWOUND on #${ch} by the new term (epoch ${leaderEpoch}): cursor ${cur} → ${newTip}; ${fresh.length} message(s) new to this receiver]`);
+      if (s) for (const id of [...s.keys()]) if (id > newTip) s.delete(id);   // ids of the lost tail mean nothing now
+      cursors[ch] = newTip;
+      for (const m of fresh) admit(m);
+    }
+    return failed;
+  }
+
   // REST backfill: on the FIRST pass seed cursors to the tip and skip backlog (a fresh listener
   // isn't flooded); on later passes (reconnect) replay the gap through consider().
   async function backfill() {
     if (!BASE) { await ensureBase(true); if (!BASE) return; }
+    if (termChanged) {
+      // Until every channel has been checked the term stays "changed": one transient error from a
+      // freshly promoted leader must not leave a channel on its stale cursor for good.
+      const seq = termSeq;
+      let failed = pendingReconcile ?? Object.keys(cursors);
+      try { failed = await reconcileTerm(failed); } catch { /* retry everything still pending */ }
+      // ANOTHER term began while we were checking: everything must be checked again against it.
+      if (seq !== termSeq) failed = Object.keys(cursors);
+      pendingReconcile = failed.length ? failed : null;
+      if (!pendingReconcile) termChanged = false;
+      else if (!retryTimerR) {   // ONE retry chain, however many polls/pushes enter this block meanwhile
+        retryTimerR = setTimeout(() => { retryTimerR = null; backfill().catch(() => {}); }, 2000); retryTimerR.unref?.();
+      }
+      if (!pendingReconcile) { reconciling = false; for (const m of held.splice(0)) consider(m); }
+    }
     let channels;
     try { channels = only ? [{ name: only }] : (await j('/api/channels')).channels; }
     catch { await ensureBase(true); return; }
@@ -193,7 +295,11 @@ export function createReceiver(opts) {
       let res;
       try { res = await j(`/api/messages/${encodeURIComponent(c.name)}?after_id=${after}`); }
       catch { continue; }
-      if (isSeed && !fromStart && cursors[c.name] === undefined) { cursors[c.name] = res.last_id || 0; continue; }
+      if (isSeed && !fromStart && cursors[c.name] === undefined) {
+        cursors[c.name] = res.last_id || 0;
+        for (const m of res.messages.slice(-SEEN_CAP)) remember(m);   // skipped, but KNOWN — a later rewind check needs them
+        continue;
+      }
       for (const m of res.messages.sort((a, b) => a.id - b.id)) consider(m);
       if (cursors[c.name] === undefined) cursors[c.name] = res.last_id || 0;
     }
@@ -268,6 +374,7 @@ export function createReceiver(opts) {
     stopPoll();
     if (regIv) { clearInterval(regIv); regIv = null; }
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (retryTimerR) { clearTimeout(retryTimerR); retryTimerR = null; }
     try { ws && ws.close(); } catch {}
     ws = null;
   }

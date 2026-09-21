@@ -6,7 +6,7 @@
 // election epoch (tiebreak: lexicographically lowest host id). Works LAN-only
 // (UDP broadcast beacon, no Tailscale needed), tailnet-only (peer scan), or mixed.
 //
-//   loadConfig()                      → { token, admin, bind, allowFileOrigin, pin, peers[], port, beaconPort }
+//   loadConfig()                      → { token, admin, bind, allowFileOrigin, pin, peers[], port, beaconPort, discovery }
 //   resolveFast({token,pin})          → {base,host,epoch} | null   (pin→cache→loopback; hot path)
 //   resolveFull({token,pin,skipSelf}) → {base,host,epoch} | null   (full merged scan; election/migrate)
 //   cacheLeader(leader) / readCache()
@@ -19,6 +19,8 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir, networkInterfaces, hostname } from 'node:os';
 import { join } from 'node:path';
 import dgram from 'node:dgram';
+import http from 'node:http';
+import https from 'node:https';
 import { execFile } from 'node:child_process';
 import { configPath } from './cc-paths.mjs';
 import { canonicalShort } from './cc-render.mjs';
@@ -61,12 +63,32 @@ export function loadConfig() {
   const beaconPort = parseInt(process.env.CC_BEACON_PORT || out.CC_BEACON_PORT) || DEFAULT_BEACON_PORT;
   const peers = (process.env.CC_PEERS || out.CC_PEERS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  return { token, admin, bind, allowFileOrigin, pin, port, beaconPort, peers };
+  // CC_DISCOVERY=peers confines discovery to pin + cache + loopback + the explicit CC_PEERS list:
+  // no LAN solicit, no tailnet scan, and (cc-bus) no beacon. /cc/whoami is unauthenticated, so in
+  // the default 'auto' mode ANY reachable bus with a higher epoch is adopted as the leader — right
+  // for a zero-config estate, wrong for a dev fleet or a CI run that must never find a stranger.
+  const discovery = (process.env.CC_DISCOVERY || out.CC_DISCOVERY || '').toLowerCase() === 'peers' ? 'peers' : 'auto';
+  return { token, admin, bind, allowFileOrigin, pin, port, beaconPort, peers, discovery };
 }
 
 // --- cache ---
 export function readCache() {
   try { return JSON.parse(readFileSync(cacheFile(), 'utf8')); } catch { return null; }
+}
+// The cached leader, IF this node may trust it. In CC_DISCOVERY=peers mode a cache entry is only
+// honoured when its base is one we would have probed anyway (pin, loopback, a CC_PEERS entry): a
+// leader.json left behind by an earlier auto-mode run — which may have adopted a stranger — would
+// otherwise keep winning on epoch, be re-cached on every resolve, and receive our bearer token.
+export function readTrustedCache() { const cfg = loadConfig(); return trustedCache(cfg, cfg.pin); }
+function trustedCache(cfg, pin) {
+  const c = readCache();
+  if (!c?.base) return null;
+  if (cfg.discovery !== 'peers') return c;
+  const base = c.base.replace(/\/$/, '');
+  const allowed = new Set([`http://127.0.0.1:${cfg.port}`]);
+  if (pin) allowed.add(pin.replace(/\/$/, ''));
+  for (const p of cfg.peers) allowed.add(/^https?:\/\//.test(p) ? p.replace(/\/$/, '') : `http://${p.includes(':') ? p : p + ':' + cfg.port}`);
+  return allowed.has(base) ? c : null;
 }
 export function cacheLeader(leader) {
   try {
@@ -75,15 +97,37 @@ export function cacheLeader(leader) {
   } catch {}
 }
 
+// --- one probe GET → parsed JSON | null. Deliberately node:http, NOT fetch (issue 44): aborting
+// a fetch cancels the REQUEST but undici keeps the half-open connect alive until its own 10s
+// connect timeout, so every probe of a black-holed peer (a static CC_PEERS entry that is down, an
+// offline tailnet IP) pinned the event loop — one-shot clients printed their result and then
+// hung ~9s before exiting. req.destroy() tears the socket down at OUR deadline. agent:false +
+// connection:close: a probe never parks a keep-alive socket either.
+function probeJson(url, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false, req, timer;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); try { req && req.destroy(); } catch {} resolve(v); };
+    try {
+      req = (url.startsWith('https:') ? https : http).get(url, { agent: false, headers: { connection: 'close' } }, (res) => {
+        if (res.statusCode !== 200) { res.resume(); return finish(null); }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; if (body.length > 65536) finish(null); });   // a whoami is tiny
+        res.on('end', () => { try { finish(JSON.parse(body)); } catch { finish(null); } });
+        res.on('error', () => finish(null));
+      });
+      req.on('error', () => finish(null));
+      timer = setTimeout(() => finish(null), timeoutMs);
+    } catch { finish(null); }
+  });
+}
+
 // --- one whoami probe ---
 export async function whoami(base, timeoutMs = 1500) {
   base = base.replace(/\/$/, '');
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const r = await fetch(base + '/cc/whoami', { signal: ctl.signal });
-    if (!r.ok) return null;
-    const j = await r.json();
+    const j = await probeJson(base + '/cc/whoami', timeoutMs);
+    if (!j) return null;
     if (typeof j.epoch !== 'number') return null;
     // Canonical base = the address WE dialed (guaranteed reachable from here), not what the
     // server guesses. host/epoch/rev/watermark come from the server. watermark is the highest
@@ -92,9 +136,9 @@ export async function whoami(base, timeoutMs = 1500) {
       base, host: j.host, epoch: j.epoch, role: j.role || 'leader',
       rev: j.rev || null, dirty: !!j.dirty,
       watermark: typeof j.watermark === 'number' ? j.watermark : 0,
+      draining: !!j.draining,   // the leader is in a drain stepdown (read-only, about to leave)
     };
   } catch { return null; }
-  finally { clearTimeout(t); }
 }
 
 // Election ordering, single source of truth (used by pickAuthoritative here AND cc-bus's
@@ -218,7 +262,7 @@ export async function resolveFast(opts = {}) {
   const port = cfg.port;
   const tryBases = [];
   if (pin) tryBases.push(pin);
-  const cached = readCache();
+  const cached = trustedCache(cfg, pin);
   if (cached?.base) tryBases.push(cached.base);
   tryBases.push(`http://127.0.0.1:${port}`);
   // Probe ALL candidates (≤3) and pick the HIGHEST epoch — NOT the first responder. A
@@ -241,15 +285,15 @@ export async function resolveFull(opts = {}) {
 
   const bases = new Set();
   if (pin) bases.add(pin.replace(/\/$/, ''));
-  const cached = readCache();
+  const cached = trustedCache(cfg, pin);
   if (cached?.base) bases.add(cached.base.replace(/\/$/, ''));
   if (!opts.skipLoopback) bases.add(`http://127.0.0.1:${port}`);
   for (const p of cfg.peers) {
     bases.add(/^https?:\/\//.test(p) ? p.replace(/\/$/, '') : `http://${p.includes(':') ? p : p + ':' + port}`);
   }
 
-  // LAN + tailnet in parallel
-  const [lan, ts] = await Promise.all([
+  // LAN + tailnet in parallel — unless discovery is confined to the explicit peer list.
+  const [lan, ts] = cfg.discovery === 'peers' ? [[], []] : await Promise.all([
     lanSolicit(cfg.beaconPort, opts.lanTimeoutMs || 400),
     tailscalePeers(),
   ]);

@@ -16,7 +16,8 @@
 // Emits:  #<channel>  [response]  "ACK — <note> · taken into lane <your_id>"
 // Follow up with a `done` (cc-send --type done) when the work actually lands.
 // ---------------------------------------------------------------------------
-import { resolveFast, loadConfig } from './cc-discover.mjs';
+import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
+import { throughDrain } from './cc-retry.mjs';
 import { pkgVersion } from './cc-rev.mjs';   // x-cc-version — the fleet version gate refuses a mismatch
 
 const a = process.argv.slice(2);
@@ -30,15 +31,15 @@ const cfg = loadConfig();
 const TOKEN = process.env.CC_TOKEN || cfg.token;
 const leader = await resolveFast({ pin: process.env.CC_BASE || cfg.pin, token: TOKEN });
 if (!leader) { console.error('ack failed: no bus leader found (loopback / LAN / tailnet all silent)'); process.exit(1); }
-const BASE = leader.base;
+let BASE = leader.base;
 const channel = toArg === 'all' ? 'general' : toArg;
 const content = `ACK — ${note} · taken into lane ${sender}`;
 
-const r = await fetch(BASE + '/api/messages', {
+const r = await throughDrain(() => fetch(BASE + '/api/messages', {
   method: 'POST',
   headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
   body: JSON.stringify({ channel, sender, content, message_type: 'response' }),
-});
+}), async () => { BASE = (await resolveFull({ pin: process.env.CC_BASE || cfg.pin, token: TOKEN }))?.base ?? BASE; }, { log: (l) => console.error(l) });
 if (!r.ok) { console.error('ack failed:', r.status, await r.text().catch(() => '')); process.exit(1); }
 const j = await r.json();
 console.log(`ACK sent -> #${j.channel} as ${sender} (id ${j.id})`);

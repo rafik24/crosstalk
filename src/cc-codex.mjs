@@ -26,6 +26,7 @@
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
+import { throughDrain } from './cc-retry.mjs';
 import { revString, pkgVersion } from './cc-rev.mjs';
 import { addressedTo, renderLine } from './cc-render.mjs';
 import { dataDir } from './cc-paths.mjs';
@@ -50,7 +51,7 @@ async function ensureBase(full = false) {
   return BASE;
 }
 async function api(path, o = {}) {
-  const r = await fetch(BASE + path, { ...o, headers: { ...H, ...(o.headers || {}) } });
+  const r = await throughDrain(() => fetch(BASE + path, { ...o, headers: { ...H, ...(o.headers || {}) } }), () => ensureBase(true), { log: (l) => console.error(l) });
   if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} console.log(`⛔ CHAT BUS — VERSION GATE: this client is ${pkgVersion() || 'unknown'} but the bus requires ${info.required || '?'}. Update the crosstalk plugin on this host.`); process.exit(1); }
   if (!r.ok) throw new Error(`${path} → ${r.status} ${await r.text().catch(() => '')}`);
   return r.json();

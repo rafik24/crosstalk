@@ -82,6 +82,8 @@ try {
     let cached = null;
     try { cached = JSON.parse(readFileSync(join(f.nodeDir(1), 'cache', 'leader.json'), 'utf8')); } catch {}
     ok(cached?.base === f.baseUrl(0), `node1 cached its leader in the scratch cache dir (${cached?.base || 'no leader.json'})`);
+    // CC_DISCOVERY=peers (set by the harness): a confined leader neither scans nor ADVERTISES.
+    ok(/becoming LEADER/.test(f.log(0)) && !/\[beacon\] announcing/.test(f.log(0)), 'the confined leader runs NO LAN beacon');
   }
   ok(l0.i === 0 && l0.epoch === 1 && l0.host === 'node0', `node0 leads at epoch 1 (got node${l0.i}@${l0.epoch})`);
   ok((await f.leaders()).length === 1, 'exactly one node answers as leader');

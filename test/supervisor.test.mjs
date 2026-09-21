@@ -162,6 +162,37 @@ try {
       '#39: the same host spelled two ways is a true tie — neither outranks the other');
   }
 
+  // --- a pull that OUTLIVES its role must not touch the disk; the epoch file is monotonic -------
+  // A stalled leader can answer /cc/export long after this node gave up on it and promoted. The
+  // late write used to plant a replica newer than the live DB (adopted, -wal deleted, on the next
+  // re-elect) and drag the epoch file backwards (the next promotion re-used a term).
+  {
+    const http = await import('node:http');
+    const { pullSnapshot, readEpoch, writeEpoch, REPLICA_FILE } = await import('../src/cc-bus.mjs');
+    const srv = http.createServer((req, res) => { if (req.url === '/cc/export') { res.setHeader('content-type', 'application/octet-stream'); res.end(Buffer.from('SNAPSHOT')); } else { res.statusCode = 404; res.end(); } });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const leader = { host: 'some-other-box', base: `http://127.0.0.1:${srv.address().port}`, epoch: 5 };
+    try {
+      try { rmSync(REPLICA_FILE); } catch {}
+      writeEpoch(7);
+      const late = await pullSnapshot(leader, 'tt', () => false);   // the role that started the pull is gone
+      ok(late.ok === false && !existsSync(REPLICA_FILE) && readEpoch() === 7, 'a pull that outlived its role writes NOTHING (no replica, epoch untouched)');
+      const live = await pullSnapshot(leader, 'tt', () => true);
+      ok(live.ok === true && existsSync(REPLICA_FILE), 'a wanted pull lands in messages.db.replica');
+      ok(readEpoch() === 7, `the epoch file never goes BACKWARDS: local 7, leader 5 → ${readEpoch()}`);
+      await pullSnapshot({ ...leader, epoch: 9 }, 'tt');
+      ok(readEpoch() === 9, 'and still follows a HIGHER leader epoch');
+    } finally {
+      // Windows + Node 24: process.exit() while undici's keep-alive socket to this server is still
+      // closing trips a NATIVE libuv assertion (UV_HANDLE_CLOSING → exit 127, all assertions green).
+      // Drop the connections and give the handles a beat to finish closing before the suite exits.
+      try { srv.closeAllConnections(); } catch {}
+      await new Promise((r) => srv.close(r));
+      await new Promise((r) => setTimeout(r, 300));
+      try { rmSync(REPLICA_FILE); } catch {}
+    }
+  }
+
   if (failed) { console.error('❌ supervisor.test FAILED'); }
   else { console.log('✅ supervisor.test: all assertions passed (pidAlive, supervisorLive 4-state, ensure idempotent-skip, failoverCoverage canonicalization/SPOF)'); }
 } catch (e) {
