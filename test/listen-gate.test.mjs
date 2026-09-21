@@ -67,6 +67,23 @@ writeFileSync(beacon, String(Date.now()));
 r = gate({ session_id: SID, tool_name: 'apply_patch', tool_input: { command: patch('D:/estate/app/api/app.py') } });
 ok(r.code === 0, '5: Codex apply_patch on estate path with a fresh beacon → allowed');
 
+// Q: Qwen Code lanes — tool names write_file / edit (absolute file_path), hint names the Qwen bridge, never Monitor
+{
+  const QSID = 'cccccccc-1111-4222-8333-444444444444', QID = 'testbox/qwen-lane-cccccccc';
+  writeFileSync(join(listenDir, QSID + '.id'), QID);
+  const qbeacon = join(listenDir, QID.replace(/[^A-Za-z0-9._-]/g, '_'));
+  let q = gate({ session_id: QSID, tool_name: 'write_file', tool_input: { file_path: 'D:/estate/app/core/x.py', content: 'x' } });
+  ok(q.code === 2 && /NOT listening/.test(q.err), 'Q1: Qwen write_file on an estate path, no beacon → BLOCKED');
+  ok(/cc-qwen-bridge\.mjs ensure/.test(q.err) && /cc-codex\.mjs wait/.test(q.err) && !/Monitor\(/.test(q.err), 'Q1: block hint is Qwen-aware (bridge ensure + TUI wait fallback, not Monitor)');
+  q = gate({ session_id: QSID, tool_name: 'edit', tool_input: { file_path: 'D:/estate/app/core/x.py', old_string: 'a', new_string: 'b' } });
+  ok(q.code === 2, 'Q2: Qwen edit on an estate path, no beacon → BLOCKED');
+  q = gate({ session_id: QSID, tool_name: 'write_file', tool_input: { file_path: 'C:/scratch/notes.md', content: 'x' } });
+  ok(q.code === 0, 'Q3: Qwen write_file outside the estate → allowed');
+  writeFileSync(qbeacon, String(Date.now()));
+  q = gate({ session_id: QSID, tool_name: 'edit', tool_input: { file_path: 'D:/estate/app/core/x.py' } });
+  ok(q.code === 0, 'Q4: Qwen edit with a fresh beacon → allowed');
+}
+
 // 7: the gate reached THROUGH A JUNCTION/SYMLINK to src/ must still run (Node realpaths the main
 //    module; a URL comparison made isMain false and the gate silently allowed everything).
 {

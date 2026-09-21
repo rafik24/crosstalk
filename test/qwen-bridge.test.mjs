@@ -13,16 +13,19 @@
 //   D. ORDER: a burst of 5 DMs arrives in bus order (serialized sink);
 //   E. LIFETIME: when the serve session disappears (404 on /status), the bridge exits on its own
 //      and clears its pid file; `ensure` on a live bridge is idempotent; `stop` kills it;
-//   F. SAFETY: a non-loopback --serve target without QWEN_SERVER_TOKEN is refused.
+//   F. SAFETY: a non-loopback --serve target without QWEN_SERVER_TOKEN is refused;
+//   G. FAIL-CLOSED PROFILE (reviewer B1): `ensure` refuses (exit 3, nothing spawned) when the Qwen profile allows "*" /
+//      an unscoped shell rule / yolo, when a PROJECT .qwen/settings.json widens it, or when the shell gate is not wired;
+//   H. a configured QWEN_SERVER_TOKEN reaches the daemon as a bearer;  L. the #27 stale-beacon REPLACE path (one bridge, new pid).
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { whoami } from '../src/cc-discover.mjs';
 import { pkgVersion } from '../src/cc-rev.mjs';
-import { pidAlive, serveTarget } from '../src/cc-qwen-bridge.mjs';
+import { pidAlive, serveTarget, laneProfileProblems } from '../src/cc-qwen-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(__dirname, '..', 'server', 'server.mjs');
@@ -56,13 +59,17 @@ const fakeServer = createServer((req, res) => {
     let text = ''; try { text = JSON.parse(body).prompt?.[0]?.text || ''; } catch {}
     fake.attempts.push(text);
     if (fake.mode === 'full') { res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '5' }); return res.end(JSON.stringify({ code: 'prompt_queue_full' })); }
-    fake.prompts.push({ text, contentType: req.headers['content-type'] });
+    fake.prompts.push({ text, contentType: req.headers['content-type'], auth: req.headers.authorization || '' });
     json(200, { promptId: 'p' + fake.prompts.length });
   });
 });
 await new Promise((r) => fakeServer.listen(0, '127.0.0.1', r));
 const SERVE = `http://127.0.0.1:${fakeServer.address().port}`;
-const env = { ...process.env, HOME, USERPROFILE: HOME, QWEN_SERVE_URL: SERVE, QWEN_SERVER_TOKEN: '', CC_RETRY_MS: '800', CC_RETRY_MAX_ATTEMPTS: '5', CC_SESSION_CHECK_MS: '400', CC_BASE: BASE, CC_TOKEN: TOKEN };
+const QH = join(HOME, 'qwen-home'); mkdirSync(QH, { recursive: true });
+const GATE_HOOK = { PreToolUse: [{ matcher: '^run_shell_command$', hooks: [{ type: 'command', command: 'node "/x/src/cc-qwen-shell-gate.mjs"' }] }] };
+const profile = (obj) => writeFileSync(join(QH, 'settings.json'), JSON.stringify(obj));
+profile({ hooks: GATE_HOOK });
+const env = { ...process.env, HOME, USERPROFILE: HOME, QWEN_HOME: QH, CC_QWEN_UNSAFE_PROFILE: '', QWEN_SERVE_URL: SERVE, QWEN_SERVER_TOKEN: '', CC_RETRY_MS: '800', CC_RETRY_MAX_ATTEMPTS: '5', CC_SESSION_CHECK_MS: '400', CC_BASE: BASE, CC_TOKEN: TOKEN };
 
 function boot(epoch) {
   return spawn(process.execPath, [SERVER], { env: { ...process.env, PORT: String(PORT), CC_EPOCH: String(epoch), CC_HOST: 'qwenhost', CC_DATA_DIR: DATA, MCP_API_KEY: TOKEN }, stdio: 'ignore' });
@@ -88,6 +95,31 @@ console.log('F serve-target safety');
   ok(threw, 'a non-loopback serve target without a bearer is refused');
   ok(serveTarget('http://10.1.2.3:4170', 'tok').headers.Authorization === 'Bearer tok', 'a non-loopback target WITH a bearer is accepted and carries it');
   ok(!serveTarget('http://127.0.0.1:4170', '').headers.Authorization, 'loopback needs no bearer');
+}
+
+console.log('G fail-closed profile');
+{
+  const cwd = mkdtempSync(join(tmpdir(), 'ccqwen-proj-'));
+  const tryEnsure = (extra = {}) => spawnSync(process.execPath, [BRIDGE, 'ensure', ID, '--session', SID], { env: { ...env, ...extra }, cwd, encoding: 'utf8', timeout: 20000 });
+  const refused = (r) => r.status === 3 && /NOT started/.test(r.stdout) && !existsSync(join(HOME, '.claude', '.cc-listen', `${SID}.bridge.pid`));
+  profile({ permissions: { allow: ['*', 'Bash(ls *)'] }, hooks: GATE_HOOK });
+  ok(refused(tryEnsure()), 'permissions.allow contains "*" → ensure refuses, nothing spawned');
+  profile({ permissions: { allow: ['run_shell_command'] }, hooks: GATE_HOOK });
+  ok(refused(tryEnsure()), 'an unscoped shell rule → refused');
+  profile({ tools: { approvalMode: 'yolo' }, hooks: GATE_HOOK });
+  ok(refused(tryEnsure()), 'approvalMode yolo → refused');
+  profile({ permissions: { allow: ['Bash(ls *)'] } });
+  ok(refused(tryEnsure()) && /shell gate/.test(tryEnsure().stdout), 'shell gate not wired → refused, and says so');
+  rmSync(join(QH, 'settings.json'));
+  ok(refused(tryEnsure()), 'unreadable user settings → refused (fail closed)');
+  profile({ hooks: GATE_HOOK });
+  mkdirSync(join(cwd, '.qwen'), { recursive: true }); writeFileSync(join(cwd, '.qwen', 'settings.json'), JSON.stringify({ permissions: { allow: ['*'] } }));
+  ok(refused(tryEnsure()), 'a PROJECT .qwen/settings.json that widens to "*" → refused');
+  rmSync(join(cwd, '.qwen'), { recursive: true, force: true });
+  ok(laneProfileProblems({ qwenHome: QH, cwd }).length === 0, 'a scoped allow list + wired shell gate is accepted');
+  const chk = spawnSync(process.execPath, [BRIDGE, 'check'], { env, cwd, encoding: 'utf8' });
+  ok(chk.status === 0 && /profile ok/.test(chk.stdout), '`check` agrees (exit 0, no network)');
+  rmSync(cwd, { recursive: true, force: true });
 }
 
 const server = boot(1);
@@ -141,6 +173,31 @@ try {
   ok(pid2 && pid2 !== bridgePid && pidAlive(pid2), 'ensure starts a fresh bridge afterwards');
   spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID], { env, encoding: 'utf8' });
   ok(await until(() => !pidAlive(pid2), 3000) && !existsSync(pidFile), '`stop` kills the bridge and clears the pid file');
+
+  console.log('L stale-beacon replace (#27) + H bearer');
+  const envTok = { ...env, QWEN_SERVER_TOKEN: 'serve-secret' };
+  const connects = () => (readFileSync(bridgeLog, 'utf8').match(/push connected/g) || []).length;
+  const c3 = connects();
+  spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID], { env, encoding: 'utf8' });   // (the E-section bridge, if any)
+  spawnSync(process.execPath, [BRIDGE, 'ensure', ID, '--session', SID], { env: envTok, encoding: 'utf8', timeout: 20000 });
+  const pid3 = readPid();
+  const beacon = join(HOME, '.claude', '.cc-listen', ID.replace(/[^A-Za-z0-9._-]/g, '_'));
+  ok(await until(() => existsSync(beacon) && connects() > c3, 15000), 'third bridge is attached (push connected) and beating its beacon');
+  await send('dm-qwen-lane-bbbbbbbb', 'hello-H');
+  ok(await until(() => got('hello-H').length === 1, 3000) && got('hello-H')[0].auth === 'Bearer serve-secret', 'QWEN_SERVER_TOKEN reaches the daemon as a bearer');
+  process.kill(pid3, 'SIGSTOP');                                   // wedge it: alive pid, beacon goes stale
+  const past = new Date(Date.now() - 300000); utimesSync(beacon, past, past); utimesSync(pidFile, past, past);
+  const e4 = spawnSync(process.execPath, [BRIDGE, 'ensure', ID, '--session', SID], { env: { ...envTok, CC_REPLACE_WAIT_MS: '1500' }, encoding: 'utf8', timeout: 20000 });
+  const pid4 = readPid();
+  ok(/beacon is stale/.test(e4.stdout) && pid4 && pid4 !== pid3, 'live pid + stale beacon → ensure replaces it (new pid)');
+  try { process.kill(pid3, 'SIGCONT'); } catch {}
+  ok(await until(() => !pidAlive(pid3), 4000), 'the wedged old bridge is gone (it had been SIGTERMed) — one bridge per session');
+  const c4 = connects(); await until(() => connects() > c4 || /push connected/.test(readFileSync(bridgeLog, 'utf8').split('beacon is stale').pop() || ''), 10000);
+  await until(() => connects() >= c3 + 2, 10000);
+  await send('dm-qwen-lane-bbbbbbbb', 'hello-L');
+  await sleep(1500);
+  ok(got('hello-L').length === 1, 'a DM after the replace is delivered exactly once (no double bridge)');
+  spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID], { env, encoding: 'utf8' });
 } catch (e) { failed = true; console.error('❌', e.message); }
 finally {
   for (const p of [bridgePid, readPid()]) { if (p) { try { process.kill(p, 'SIGKILL'); } catch {} } }
