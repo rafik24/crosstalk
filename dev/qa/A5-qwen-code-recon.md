@@ -73,3 +73,20 @@ Two transports, by session kind:
   (asynchronous); the turn streams on `GET /session/:id/events` as `session_update` / `text` frames and ends with one
   `turn_complete`; `GET /session/:id/status` exposes `hasActivePrompt` / `activeWorkState: idle`. The model saw the
   hook-injected context in the serve session too. → carrier for the scripted Qwen lane is confirmed end to end.
+
+## 7. Live lane results (isolated bus + `qwen serve` + local vLLM, scratch profile; driver = dev/qa/a5-demo-qwen-lane.mjs)
+- The real wiring works end to end: `hooks/qwen-hooks.json` → `src/qwen-join.sh` mints `host/qwen-<topic>-<sid8>`, registers,
+  backgrounds the bridge; `cc-listen-gate` (now matching Qwen's `write_file|edit`, both carry an absolute `file_path`) exits 2
+  BEFORE the bridge beacon and 0 AFTER; a DM is pushed in as a turn and Qwen answers ON THE BUS via its shell tool.
+- TOOL GATING under `qwen serve` = approval mode `auto` (an LLM classifier). It DENIED the bus send as "external messaging"
+  in one run and allowed it in another → nondeterministic. A lane needs ONE explicit allow rule, nothing broader:
+  `permissions.allow: ["Bash(node <plugin-src>/cc-codex.mjs *)"]`. Never `"*"` on a profile that receives bus text.
+- The hook runs INSIDE serve's ~10 s session-init deadline; the 3.3.3 one-shot clients linger ~9 s (#44) → slow steps are
+  backgrounded in qwen-join.sh. After #44 lands they can move back to the foreground.
+- OBEDIENCE mini-eval (same prompt, same cheat-sheet, 1 DM "a + 23? reply with the number and a nonce on this channel"):
+  `qwen3.6-35b-a3b` (thinking ON): 5/5 replied on the bus, correct channel, `--type response`, correct sum, ~24–27 s wall
+  (≈6 s model turn). `qwen3.6-35b-a3b-fast` (thinking OFF): 4/8 overall — failures: answered in its own session text without
+  calling the tool (3×, twice with a WRONG sum), sent an `ACK — taking … into my lane` instead of the answer (1×), and once
+  used `--type message`. → the Qwen lane should pin the THINKING model id; the fast id is not reliable enough for bus etiquette.
+- Wording matters: the generic Codex cheat-sheet alone was not enough for Qwen; the explicit rule "TO REPLY YOU MUST RUN THE
+  Send COMMAND … text you merely write in this session is NOT delivered" is in qwen-join.sh. Both prompts are in git history.

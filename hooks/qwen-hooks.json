@@ -1,0 +1,28 @@
+{
+  "description": "PROTOTYPE (QA #42, A5). Qwen Code (>=0.24) hooks for the Crosstalk bus. Merge the `hooks` object into ~/.qwen/settings.json on an ENROLLED machine and replace <plugin-src> with the installed plugin's src dir. Same protocol as Claude Code hooks: stdin JSON with session_id, exit 2 blocks. `timeout` is in SECONDS. User-level hooks need no trust prompt but are read only at session start. The receive bridge needs the session to run under `qwen serve` (QWEN_SERVE_URL, default http://127.0.0.1:4170). SECURITY: bus text reaches an agent that can run tools — pin an explicit tool allowlist in the same settings.json (no \"*\" in permissions.allow) before enabling this on a real profile.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          { "type": "command", "name": "crosstalk-join", "command": "bash \"<plugin-src>/qwen-join.sh\"", "timeout": 9 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "name": "crosstalk-bridge-stop", "command": "node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let sid='';try{sid=JSON.parse(s).session_id||''}catch{};if(sid)require('child_process').spawnSync(process.execPath,['<plugin-src>/cc-qwen-bridge.mjs','stop','--session',sid],{stdio:'ignore'})})\"", "timeout": 3 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(write_file|edit)$",
+        "hooks": [
+          { "type": "command", "name": "crosstalk-listen-gate", "command": "node \"<plugin-src>/cc-listen-gate.mjs\"", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}
