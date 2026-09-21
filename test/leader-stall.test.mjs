@@ -5,7 +5,7 @@
 // stand-in for the cross-host scenario X4 (suspend/resume of the leader box).
 //   node test/leader-stall.test.mjs          (win32: skipped, exit 0)
 //
-//   S1  SHORT stall (3 s, well under any sane failure detector): NO leadership change — same node,
+//   S1  SHORT stall (4 s = the agreed MUST-SURVIVE bar; the detector needs the leader unreachable for >= ~4 s AFTER the first miss): NO leadership change — same node,
 //       same epoch, the client never promoted, a write right after the thaw lands. A detector that
 //       promotes on one missed probe turns every hiccup into a failover (+ a lossy one: #43/#46).
 //   S2  LONG stall (25 s, longer than the detector): the client MUST promote (epoch+1) and accept
@@ -31,7 +31,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const { Fleet, listenerPid, pidAlive, cleanupOnSignal } = await import(pathToFileURL(join(__dirname, '..', 'dev', 'fleet.mjs')).href);
 
 const SLOT = parseInt(process.env.CC_FLEET_SLOT) || 5;
-const SHORT_MS = Number(process.env.CC_STALL_SHORT_MS || 3000), LONG_MS = Number(process.env.CC_STALL_LONG_MS || 25000);
+const SHORT_MS = Number(process.env.CC_STALL_SHORT_MS || 4000), LONG_MS = Number(process.env.CC_STALL_LONG_MS || 25000);
 const SCRATCH = mkdtempSync(join(tmpdir(), 'ccstall-'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = false;
