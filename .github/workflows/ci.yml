@@ -23,7 +23,7 @@ jobs:
   test:
     name: ${{ matrix.os }} · node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 45   # the fleet suites are real-time bound (15 s failover ticks): ~15 min on a fast box
     strategy:
       fail-fast: false        # one OS going red must not hide the other's verdict
       matrix:
