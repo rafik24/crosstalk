@@ -130,7 +130,7 @@ async function main() {
   const port = Number(opt('--port', 4170)); const serve = `http://127.0.0.1:${port}`;
   const dir = join(LANES_DIR, id.replace(/[^A-Za-z0-9._-]/g, '_'));
   const workspace = resolve(opt('--workspace', join(dir, 'workspace')));
-  mkdirSync(workspace, { recursive: true });
+  mkdirSync(dir, { recursive: true }); mkdirSync(workspace, { recursive: true });
   const laneEnv = {}; for (const k of ['CC_BUS_CONFIG', 'CC_CACHE_DIR', 'CC_DISCOVERY', 'CC_BEACON_PORT', 'CC_PORT', 'HOME', 'USERPROFILE', 'PATH', 'SystemRoot']) if (process.env[k]) laneEnv[k] = process.env[k];
   const settingsPath = join(dir, 'lockdown-settings.json');
   writeFileSync(settingsPath, JSON.stringify(lockdownSettings({ id, model: opt('--model', null), laneEnv }), null, 2), { mode: 0o600 });
