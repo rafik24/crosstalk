@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// cc-name.mjs — (re)name THIS session on the Cross-Claude bus to host/<slug>.
+// cc-name.mjs — (re)name THIS session on the Crosstalk bus to host/<slug>.
 //
 // The join hook gives every session a unique-but-terse default id
 // (host/<branch>-<shortid>). This lets a session rename itself after what it is

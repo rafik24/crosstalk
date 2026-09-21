@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# cc-join.sh — SessionStart hook: auto-join the live Cross-Claude chat bus.
+# cc-join.sh — SessionStart hook: auto-join the live Crosstalk chat bus.
 #
 # OPT-IN PER MACHINE: this no-ops entirely unless the bus config (~/.claude/.crosstalk,
 # or legacy ~/.claude/.cross-claude-bus) exists — so it only fires on enrolled machines (the
@@ -29,7 +29,12 @@ if [ -z "$CFG" ]; then
   elif [ -f "$HOME/.claude/.cross-claude-bus" ]; then CFG="$HOME/.claude/.cross-claude-bus"
   else CFG="$HOME/.claude/.crosstalk"; fi
 fi
-[ -f "$CFG" ] || exit 0
+# Not enrolled: say so in ONE line instead of exiting silently (issue #38 — a fresh plugin
+# install used to do nothing and say nothing, so the machine looked broken rather than unenrolled).
+if [ ! -f "$CFG" ]; then
+  echo "crosstalk: plugin installed but this machine is not enrolled — create $CFG with CC_TOKEN=<estate token> (+ CC_AUTO_SUPERVISOR=1 to let the first session start the bus). See the plugin's ENROLLMENT.md."
+  exit 0
+fi
 command -v node >/dev/null 2>&1 || exit 0
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$HERE/cc-ws.mjs"
@@ -111,10 +116,12 @@ LISTEN_DIR="$HOME/.claude/.cc-listen"
 mkdir -p "$LISTEN_DIR" 2>/dev/null || true
 [ -n "$SID" ] && printf '%s' "$ID" > "$LISTEN_DIR/$SID.id" 2>/dev/null || true
 
-# running-code revision of THIS checkout (short SHA, '+' if the worktree is dirty). Advertised
-# on register so the estate can spot a node on stale code, and compared to the leader below.
-rev=$(git -C "$PWD" rev-parse --short HEAD 2>/dev/null || true)
-[ -n "$rev" ] && [ -n "$(git -C "$PWD" status --porcelain 2>/dev/null)" ] && rev="${rev}+"
+# running-code revision of the CROSSTALK code (short SHA, '+' if dirty) — via cc-rev.mjs, which
+# resolves the plugin/checkout root and prints 'unknown' for a plugin-cache install. It used to be
+# `git -C "$PWD"` — the SESSION'S cwd repo — so a mailroom session advertised mailroom's HEAD and
+# the estate read it as an unpushed crosstalk commit (issue #32). Never measure the caller's repo.
+rev="$(node "$HERE/cc-rev.mjs" 2>/dev/null | cut -d' ' -f1 || true)"
+[ "$rev" = "unknown" ] && rev=""
 
 # release version (package.json semver) — the fleet version gate refuses a host that is not on the
 # leader's version, so register MUST carry it or a current host is 426'd on every session start.

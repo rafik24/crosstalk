@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// ws-hub.mjs — real-time push transport for the Cross-Claude bus (issue #3).
+// ws-hub.mjs — real-time push transport for the Crosstalk bus (issue #3).
 //
 // Attaches a WebSocket endpoint to the leader's existing http.Server via the
 // `upgrade` event, so push lives on the SAME port/token as the REST API — no new
@@ -265,8 +265,23 @@ export function attachWsHub(httpServer, { token, log = () => {}, allowedOrigins 
     }
   }
 
+  // Tear down every upgraded socket. server.closeAllConnections() does NOT touch sockets that
+  // were upgraded off the http parser, so a shutdown that skips this never resolves while any
+  // WS client is attached — the exact stepdown wedge of issue #34. Best-effort close frame
+  // first (a well-behaved client sees 1000-ish close), then destroy.
+  function destroy() {
+    for (const sockets of conns.values()) {
+      for (const socket of sockets) {
+        try { socket.write(encodeFrame('', 0x8)); } catch {}
+        try { socket.destroy(); } catch {}
+      }
+    }
+    conns.clear();
+  }
+
   return {
     notify,
+    destroy,
     connectionCount: () => { let n = 0; for (const s of conns.values()) n += s.size; return n; },
     identities: () => [...conns.keys()],
   };

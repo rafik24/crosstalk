@@ -77,7 +77,7 @@ Key choices (all agreed with pi in the POC):
 ## Install (on the box running pi, e.g. `linux-box`)
 
 1. The machine must already be enrolled on the bus (`~/.claude/.crosstalk` holds `CC_TOKEN`).
-2. `export CC_LIVE=/absolute/path/to/cross-claude-client` — the checkout root (has `package.json` +
+2. `export CC_LIVE=/absolute/path/to/crosstalk` — the checkout root (has `package.json` +
    `src/`). Resolve it from the environment; never hardcode it in the extension.
 3. Copy or symlink `src/pi/crosstalk.ts` to `~/.pi/agent/extensions/crosstalk.ts`, or launch pi with
    `pi -e /path/to/src/pi/crosstalk.ts`.
@@ -100,7 +100,7 @@ it: one engine, one source of truth, no build step, and the version gate stays h
 
 Captured from pi's first-contact run, filed for the bus repo (not required for 3.3.0):
 
-1. **Tilde mid-path.** `node ~/cross-claude-client/src/cc-*.mjs` fails — bash only expands `~` at a
+1. **Tilde mid-path.** `node ~/crosstalk/src/cc-*.mjs` fails — bash only expands `~` at a
    word start, so node gets the literal `~/…`. Onboarding docs should use `$HOME`, and the clients
    should self-locate their root.
 2. **`join` should print online peers** (or a who-is-here line) — would have caught a stale

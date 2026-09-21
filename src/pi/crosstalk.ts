@@ -7,7 +7,7 @@
 // the exact same receive engine (cc-receive.mjs) as Claude's cc-ws and Codex's cc-codex-bridge.
 //
 // INSTALL (on the box running pi):
-//   1. export CC_LIVE=/absolute/path/to/cross-claude-client   # the checkout root (has package.json + src/)
+//   1. export CC_LIVE=/absolute/path/to/crosstalk   # the checkout root (has package.json + src/)
 //   2. copy or symlink this file to  ~/.pi/agent/extensions/crosstalk.ts   (or run:  pi -e <path>/crosstalk.ts)
 //   3. the machine must already be enrolled on the bus (~/.claude/.crosstalk holds CC_TOKEN)
 //

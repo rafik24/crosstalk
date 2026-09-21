@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// cc-discover.mjs — zero-config discovery of the authoritative Cross-Claude bus.
+// cc-discover.mjs — zero-config discovery of the authoritative Crosstalk bus.
 //
 // No IP is configured in the default path. The leader is found by probing, in
 // order, cheapest-first, then MERGING every responder and picking the HIGHEST
@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import dgram from 'node:dgram';
 import { execFile } from 'node:child_process';
 import { configPath } from './cc-paths.mjs';
+import { canonicalShort } from './cc-render.mjs';
 
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_BEACON_PORT = 8788;
@@ -113,7 +114,11 @@ export function outranks(a, b) {
   if (a.epoch !== b.epoch) return a.epoch > b.epoch;
   const aw = a.watermark ?? 0, bw = b.watermark ?? 0;
   if (aw !== bw) return aw > bw;
-  return String(a.host).localeCompare(String(b.host)) < 0;
+  // Deterministic final tie-break (#39): canonicalize both host ids (lowercase slug — the same
+  // filter instance ids get) and compare code points. localeCompare on raw hostnames made the
+  // winner of an exact tie depend on casing and platform locale.
+  const ah = canonicalShort(String(a.host || '')), bh = canonicalShort(String(b.host || ''));
+  return ah < bh;
 }
 
 // pick the authoritative leader among responders per the outranks() ordering.

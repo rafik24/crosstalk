@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// cc-bus.mjs — Cross-Claude bus supervisor + control CLI.
+// cc-bus.mjs — Crosstalk bus supervisor + control CLI.
 //
 //   cc-bus start                     Elect: if a bus is already present anywhere
 //                                     (loopback / LAN / tailnet) → run CLIENT-ONLY
@@ -17,11 +17,11 @@
 //                                     steps the old leader down.
 //
 // One clone of this repo on any node can host the bus or connect to whoever hosts.
-// Config (token, optional pin/peers) comes from ~/.claude/.cross-claude-bus.
+// Config (token, optional pin/peers) comes from ~/.claude/.crosstalk (legacy name still honoured).
 // ---------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync, openSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -40,10 +40,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // (The src/ reorg moved this file without updating this self-locating path; a wrong entry makes
 // spawnLeader spawn a missing module → supervisor crash-loop → total bus blackout.)
 const SERVER_ENTRY = join(__dirname, '..', 'server', 'server.mjs');
-const HOST = process.env.CC_HOST || hostname();
+// Host identity is CANONICALIZED once (lowercase slug, issue #39): the OS hostname's casing used
+// to leak into the advertised leader host while instance ids were lowercased, so the same box
+// compared unequal to itself (defeating the same-host guard) and the election tie-break depended
+// on casing/locale. canonicalShort is the same filter cc-name applies to instance ids.
+const HOST = canonicalShort(process.env.CC_HOST || hostname()) || 'unknown-host';
 const DATA_DIR = dataDir();   // ~/.crosstalk (migrated from ~/.cross-claude-mcp once); CC_DATA_DIR overrides
 const EPOCH_FILE = join(DATA_DIR, 'epoch');
 const DB_FILE = join(DATA_DIR, 'messages.db');
+// A client replicates into THIS file, never over messages.db (issue #35): renaming over the live
+// DB while a same-host leader had it open unlinked the leader's inode, silently forfeiting every
+// write since the last snapshot on the next leader restart. The replica is adopted (swapped in)
+// only at promotion time, when no local server has the DB open.
+const REPLICA_FILE = join(DATA_DIR, 'messages.db.replica');
 
 // --- singleton supervisor bookkeeping (#6) ---
 // A per-machine heartbeat file so `cc-bus ensure` can tell whether a supervisor is already
@@ -193,18 +202,41 @@ async function waitFor(base, predicate, timeoutMs = 20000, everyMs = 400) {
 // image in atomically. Best-effort: any failure returns false and never disturbs the client.
 async function replicateSnapshot(leader, token) {
   try {
+    // Issue #35: NEVER replicate when the leader is this very host — the pull would target the
+    // same DATA_DIR the live leader has open. The old guard matched only a loopback-resolved
+    // base URL (defeated by CC_BIND=0.0.0.0, where discovery returns the LAN address) and a
+    // case-sensitive host compare (defeated by OS-vs-config casing, issue #39). Canonical host
+    // equality catches both. A same-host client still watches for failover; it just never pulls.
+    if (canonicalShort(String(leader.host || '')) === HOST) return false;
     const r = await fetch(leader.base + '/cc/export', { headers: { Authorization: adminBearer(token) } });
     if (!r.ok) return false;
     const buf = Buffer.from(await r.arrayBuffer());
     if (!buf.length) return false;
     mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = DB_FILE + '.repl';
+    const tmp = REPLICA_FILE + '.tmp';
     writeFileSync(tmp, buf);
-    for (const suf of ['-wal', '-shm']) { try { rmSync(DB_FILE + suf); } catch {} }
-    renameSync(tmp, DB_FILE);   // replaces the target on both POSIX and Windows
+    renameSync(tmp, REPLICA_FILE);   // atomic on both POSIX and Windows; live DB untouched (#35)
     if (typeof leader.epoch === 'number') writeEpoch(leader.epoch);
     return true;
   } catch { return false; }
+}
+
+// Adopt the replicated snapshot as the working DB at PROMOTION time — the only moment we know no
+// local server has messages.db open. The replica wins when the live DB is absent or the replica
+// is at least as fresh (mtime); stale WAL/SHM from a previous term are cleared with it. Returns
+// what happened for the log. Exported for the test suite.
+export function adoptReplicaIfFresher() {
+  try {
+    if (!existsSync(REPLICA_FILE)) return 'no-replica';
+    let adopt = true;
+    if (existsSync(DB_FILE)) {
+      try { adopt = statSync(REPLICA_FILE).mtimeMs >= statSync(DB_FILE).mtimeMs; } catch { adopt = false; }
+    }
+    if (!adopt) { try { rmSync(REPLICA_FILE); } catch {} return 'db-fresher'; }
+    for (const suf of ['-wal', '-shm']) { try { rmSync(DB_FILE + suf); } catch {} }
+    renameSync(REPLICA_FILE, DB_FILE);
+    return 'adopted';
+  } catch (e) { return 'error:' + (e?.message || e); }
 }
 
 // Advertise this supervisor on the bus so `cc-bus status` can count failover capacity across the
@@ -251,7 +283,9 @@ async function cmdStart() {
   // that failover capacity observable estate-wide (so `cc-bus status` can show the SPOF state).
   const supervisorId = SUPERVISOR_PREFIX + HOST;
   const beat = () => {
-    writeSupervisor({ pid: process.pid, ts: Date.now(), host: HOST, role: role || 'starting', epoch: currentEpoch });
+    // version + path let `ensure` detect a supervisor left running from a superseded plugin
+    // install (issue #37) and hand over instead of treating the stale one as healthy.
+    writeSupervisor({ pid: process.pid, ts: Date.now(), host: HOST, role: role || 'starting', epoch: currentEpoch, version: pkgVersion() || null, path: fileURLToPath(import.meta.url) });
     registerSupervisor(supervisorId, role, currentEpoch, token, port).catch(() => {});
   };
   beat();
@@ -259,6 +293,10 @@ async function cmdStart() {
   heartbeatIv.unref?.();
 
   async function becomeLeader() {
+    // Swap in the replicated snapshot now, before any server opens the DB (#35): promotion is
+    // the one safe moment for the replica → messages.db rename.
+    const adoption = adoptReplicaIfFresher();
+    if (adoption === 'adopted') log('adopted the replicated snapshot as messages.db for this promotion');
     // #7 empty-snapshot guard: never blank the bus. If this node has NO local DB at all (never
     // led, never replicated), do one final full scan before promoting — a just-joined node must
     // not promote an empty store over a leader that discovery merely hadn't found yet. A node that
@@ -315,6 +353,18 @@ async function cmdStart() {
             `(${HOST} epoch ${epoch}, watermark ${me.watermark}) → stepping down to CLIENT`);
         clearInterval(monitorIv); monitorIv = null;
         steppingDown = true;
+        // Watchdog (#34): the stepdown REQUEST is not the stepdown. If the child has not exited
+        // shortly after the POST (a wedged close, a hung event loop), escalate: kill, then SIGKILL.
+        // Without this, a stepdown that never completed left the supervisor 'leader' forever with
+        // no listener — the exact wedge of the 3.3.2 rollout. child.on('exit') clears the flags.
+        const c = child;
+        const watchdog = setTimeout(() => {
+          if (c.exitCode === null && c.signalCode === null) { log('stepdown watchdog: server still alive 5s after /cc/stepdown → kill()'); try { c.kill(); } catch {} }
+          setTimeout(() => {
+            if (c.exitCode === null && c.signalCode === null) { log('stepdown watchdog: still alive → SIGKILL'); try { c.kill('SIGKILL'); } catch {} }
+          }, 5000).unref?.();
+        }, 5000);
+        watchdog.unref?.();
         try { await fetch(`http://127.0.0.1:${port}/cc/stepdown`, { method: 'POST', headers: { Authorization: adminBearer(token) } }); } catch { try { child.kill(); } catch {} }
       }
     }, 5000);
@@ -354,8 +404,10 @@ async function cmdStart() {
     if (leader) {
       cacheLeader(leader);
       currentEpoch = leader.epoch ?? currentEpoch;
-      if (leader.host === HOST && /127\.0\.0\.1|localhost/.test(leader.base)) {
+      if (canonicalShort(String(leader.host || '')) === HOST) {
         // A server is already running on THIS host (previous cc-bus). Don't double-start.
+        // Canonical compare (#39) — the old `leader.host === HOST && loopback-base` pair missed a
+        // CC_BIND leader (discovery returns the LAN address) and any casing difference (#35).
         log(`a server is already running here (epoch ${leader.epoch}) → CLIENT mode`);
       } else {
         log(`bus present: leader ${leader.host} epoch ${leader.epoch} @ ${leader.base}`);
@@ -390,9 +442,51 @@ async function cmdStart() {
 // NOT a fragile bash pid check. An atomic lock serializes concurrent session-starts so exactly
 // one supervisor runs per machine. Fast (no network) and fail-soft — it must never wedge a start.
 // ===========================================================================
+// Does the live supervisor need replacing because it runs a superseded install (#37)? True ONLY
+// when its heartbeat POSITIVELY carries a different version than ours. A heartbeat without a
+// `version` (pre-#37 format, or a foreign/corrupt file) deliberately does NOT trigger the kill
+// path — the handover terminates whatever pid the file names, and that escalation must never
+// run on the strength of a record we can't attribute to a versioned supervisor. (A legacy
+// supervisor therefore needs one last manual kill; every one written by this code is covered.)
+// Exported for the test suite.
+export function needsVersionHandover(live, myVersion = pkgVersion()) {
+  if (!live || !myVersion || !live.version) return false;
+  return live.version !== myVersion;
+}
+
+// The log sink for a hook-started supervisor (#36): stdio used to be 'ignore', so a wedged or
+// crash-looping bus left no trace at all. One rolling file in the data dir, rotated at ~1MB.
+function ensureLogFd() {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    const logPath = join(DATA_DIR, 'cc-bus.log');
+    try { if (statSync(logPath).size > 1024 * 1024) renameSync(logPath, logPath + '.old'); } catch {}
+    return openSync(logPath, 'a');
+  } catch { return 'ignore'; }
+}
+
 function cmdEnsure() {
   const live = supervisorLive();
-  if (live) { log(`supervisor already running here (pid ${live.pid}, role ${live.role || '?'}) — nothing to do`); return; }
+  if (live && needsVersionHandover(live)) {
+    // Issue #37: a supervisor from a superseded plugin install keeps running old code (and, when
+    // it leads, version-gates the whole upgraded fleet out) until killed by hand. Hand over: ask
+    // a local leader to step down gracefully (its client peers promote on a fresh snapshot),
+    // kill the old supervisor, then fall through to start the current-version one.
+    log(`supervisor here runs ${live.version || 'an unversioned install'} but the plugin is ${pkgVersion()} → version handover (pid ${live.pid})`);
+    try {
+      const cfg = loadConfig();
+      // Best-effort local-leader stepdown; fire-and-forget with a short deadline.
+      fetch(`http://127.0.0.1:${cfg.port}/cc/stepdown`, { method: 'POST', headers: { Authorization: adminBearer(cfg.token) }, signal: AbortSignal.timeout(2000) }).catch(() => {});
+    } catch {}
+    setTimeout(() => { try { process.kill(live.pid); } catch {} }, 2500);
+    setTimeout(() => { try { if (pidAlive(live.pid)) process.kill(live.pid, 'SIGKILL'); } catch {} }, 5000);
+    // The stale heartbeat would block the respawn below for up to SUPERVISOR_STALE_MS; drop it.
+    try { rmSync(SUPERVISOR_FILE); } catch {}
+    // Defer the respawn past the kill escalation so old and new never overlap on the port.
+    setTimeout(() => { try { cmdEnsure(); } catch {} }, 6000);
+    return;
+  }
+  if (live) { log(`supervisor already running here (pid ${live.pid}, role ${live.role || '?'}, v${live.version || '?'}) — nothing to do`); return; }
 
   // Serialize the check-and-spawn so two near-simultaneous ensures don't both start a supervisor.
   mkdirSync(DATA_DIR, { recursive: true });
@@ -413,8 +507,12 @@ function cmdEnsure() {
     // Re-check under the lock — another ensure may have started one between our first check and
     // taking the lock.
     if (supervisorLive()) { log('supervisor came up concurrently — nothing to do'); return; }
+    // Supervisor + server output goes to ~/.crosstalk/cc-bus.log (#36) — 'ignore' left zero
+    // trace of a wedged or crash-looping bus. spawnLeader uses stdio:'inherit', so the server
+    // child writes to the same file. Role transitions are already log()-ed lines.
+    const fd = ensureLogFd();
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'start'], {
-      detached: true, stdio: 'ignore', windowsHide: true,   // no flashing console window on Windows
+      detached: true, stdio: fd === 'ignore' ? 'ignore' : ['ignore', fd, fd], windowsHide: true,   // no flashing console window on Windows
     });
     child.unref();
     // Record the child pid immediately so a follow-on ensure sees the slot as claimed before the
@@ -438,7 +536,7 @@ async function cmdStatus() {
     const myVer = pkgVersion() || 'unknown';
     const leaderVer = leader.version || 'unknown';
     console.log(`LEADER: ${leader.host}  epoch=${leader.epoch}  watermark=${leader.watermark ?? 0}  base=${leader.base}  rev=${leaderRev}  version=${leaderVer}`);
-    console.log(`THIS NODE: ${hostname()}  rev=${mine}  version=${myVer}  local-supervisor=${supervisorLive() ? 'running' : 'none'}`);
+    console.log(`THIS NODE: ${HOST}  rev=${mine}  version=${myVer}  local-supervisor=${supervisorLive() ? 'running' : 'none'}  log=${join(DATA_DIR, 'cc-bus.log')}`);
     // Version mismatch is now ENFORCED (the bus refuses a non-matching client, see version-gate.mjs),
     // so surface it prominently — a stale host here is one that would be blocked from joining.
     if (leader.version && myVer !== 'unknown' && myVer !== leaderVer) {
@@ -715,7 +813,7 @@ function argOf(args, name) { const i = args.indexOf(name); return i >= 0 ? args[
 
 // Exported for the test suite (the singleton decision logic + the coverage host-matching). The
 // CLI runs only when this file is executed directly (below), so importing it for a test is inert.
-export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY };
+export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY, replicateSnapshot, REPLICA_FILE, DB_FILE, HOST };
 // (failoverCoverage is exported at its definition above.)
 // SERVER_ENTRY is exported so a test can assert it resolves to a file that actually exists —
 // a self-locating path that points at a missing module makes spawnLeader crash-loop the bus,

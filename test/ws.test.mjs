@@ -130,6 +130,26 @@ try {
   ok(count(out, 'GAP_B') === 1, 'D: GAP_B delivered exactly once via backfill');
   ok(count(out, 'GAP_C') === 1, 'D: GAP_C delivered exactly once via backfill');
   ok(count(out, 'DM_ONE') === 1, 'D: the earlier DM was not re-shown after reconnect');
+
+  // E (issue #34): /cc/stepdown with a LIVE WebSocket client attached must (1) write the
+  // .stepdown marker (the supervisor's demote-to-CLIENT signal — cc-bus always expected the
+  // server to write it, nothing ever did) and (2) actually END the server process. Before the
+  // fix, closeAllConnections skipped the upgraded socket, close() never resolved, nothing
+  // called exit — the child lived on listener-less forever, so this section times out RED.
+  {
+    const { existsSync, rmSync } = await import('node:fs');
+    const { join: pjoin } = await import('node:path');
+    const marker = pjoin(DATA, '.stepdown');
+    try { rmSync(marker); } catch {}
+    // the bridge from section D is still attached — that IS the live WS client.
+    const exited = new Promise((r) => srv.once('exit', () => r(true)));
+    const sd = await fetch(BASE + '/cc/stepdown', { method: 'POST', headers: H });
+    ok(sd.ok, 'E: stepdown acked over loopback');
+    const done = await Promise.race([exited, sleep(6000).then(() => false)]);
+    ok(done === true, 'E: server process EXITED after stepdown despite a live WS client (no zombie)');
+    ok(existsSync(marker), 'E: .stepdown marker written for the supervisor demote-to-CLIENT path');
+    srv = null;   // already gone; don't re-kill in finally
+  }
 } catch (e) {
   failed = true;
   console.error('❌ ws.test threw:', e.stack || e.message);

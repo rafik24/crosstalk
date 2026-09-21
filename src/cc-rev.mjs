@@ -59,3 +59,10 @@ export function pkgVersion() {
   } catch { cachedPkg = null; }
   return cachedPkg;
 }
+
+// CLI: `node cc-rev.mjs` prints "<rev> <version>" for shell callers (cc-join.sh, issue #32) —
+// the CROSSTALK code's identity, never the caller's cwd repo. Guarded so importing stays inert.
+import { pathToFileURL } from 'node:url';
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  console.log(`${revString()} ${pkgVersion() || 'unknown'}`);
+}

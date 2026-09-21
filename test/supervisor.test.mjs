@@ -112,6 +112,52 @@ try {
   ok(twoHosts.backups.length === 1 && twoHosts.backups[0] === 'raf-ms-7e59',
     'coverage: a distinct online supervisor host is a real backup; offline + non-supervisor rows excluded');
 
+  // --- issue #35: replica-file replication, never over the live DB -------------------------
+  {
+    const { adoptReplicaIfFresher, replicateSnapshot, REPLICA_FILE, DB_FILE, HOST } = await import('../src/cc-bus.mjs');
+    const { existsSync: ex, utimesSync } = await import('node:fs');
+
+    ok(adoptReplicaIfFresher() === 'no-replica', '#35: no replica → nothing to adopt');
+
+    writeFileSync(REPLICA_FILE, 'snapshot-bytes');
+    ok(adoptReplicaIfFresher() === 'adopted' && ex(DB_FILE) && !ex(REPLICA_FILE),
+      '#35: replica adopted as messages.db at promotion (rename, replica consumed)');
+    ok(readFileSync(DB_FILE, 'utf8') === 'snapshot-bytes', '#35: adopted DB carries the replica bytes');
+
+    writeFileSync(REPLICA_FILE, 'older-snapshot');
+    const old = (Date.now() - 60000) / 1000;
+    utimesSync(REPLICA_FILE, old, old);   // replica strictly older than the DB
+    ok(adoptReplicaIfFresher() === 'db-fresher' && !ex(REPLICA_FILE) && readFileSync(DB_FILE, 'utf8') === 'snapshot-bytes',
+      '#35: a fresher local DB wins; the stale replica is discarded, DB untouched');
+
+    // Same-host guard: a client must NEVER pull when the leader is this very machine — the pull
+    // targets the DATA_DIR the live leader has open. Casing must not defeat the guard (#39).
+    ok(await replicateSnapshot({ host: HOST.toUpperCase(), base: 'http://127.0.0.1:1', epoch: 1 }, 'tt') === false,
+      '#35: replication refused when the leader host is this host (case-insensitive)');
+    ok(!ex(REPLICA_FILE), '#35: the refused same-host pull wrote nothing');
+  }
+
+  // --- issue #37: version handover decision ------------------------------------------------
+  {
+    const { needsVersionHandover } = await import('../src/cc-bus.mjs');
+    ok(needsVersionHandover({ version: '0.0.1' }, '9.9.9') === true, '#37: stale-version supervisor → handover');
+    ok(needsVersionHandover({ version: '9.9.9' }, '9.9.9') === false, '#37: same version → healthy, no handover');
+    ok(needsVersionHandover({}, '9.9.9') === false,
+      '#37: a version-less heartbeat NEVER triggers the kill path (unattributable pid — this exact test process was killed by the first draft)');
+    ok(needsVersionHandover(null, '9.9.9') === false, '#37: no live supervisor → nothing to hand over');
+    ok(needsVersionHandover({ version: '0.0.1' }, null) === false, '#37: own version unknown → fail-safe, no kill');
+  }
+
+  // --- issue #39: deterministic, casing-blind election tie-break ---------------------------
+  {
+    const { outranks } = await import('../src/cc-discover.mjs');
+    const at = (host) => ({ epoch: 3, watermark: 7, host });
+    ok(outranks(at('ABox'), at('z-box')) === true, '#39: tie-break is canonical (abox < z-box) regardless of casing');
+    ok(outranks(at('z-box'), at('ABox')) === false, '#39: …and the ordering is antisymmetric');
+    ok(outranks(at('RAF-MS-7E59'), at('raf-ms-7e59')) === false && outranks(at('raf-ms-7e59'), at('RAF-MS-7E59')) === false,
+      '#39: the same host spelled two ways is a true tie — neither outranks the other');
+  }
+
   if (failed) { console.error('❌ supervisor.test FAILED'); }
   else { console.log('✅ supervisor.test: all assertions passed (pidAlive, supervisorLive 4-state, ensure idempotent-skip, failoverCoverage canonicalization/SPOF)'); }
 } catch (e) {

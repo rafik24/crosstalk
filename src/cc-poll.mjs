@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// cc-poll.mjs — Monitor-friendly live receiver for the Cross-Claude bus.
+// cc-poll.mjs — Monitor-friendly live receiver for the Crosstalk bus.
 //
 // Prints ONE line per NEW message that is ADDRESSED TO YOU (a DM channel to you or an
 // @mention of your id) and heartbeats presence so this instance shows "online". Ambient
@@ -38,7 +38,7 @@ if (!instance || instance.startsWith('--')) {
 }
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
 const ALL = args.includes('--all');   // firehose: emit EVERY message (ambient included)
-// Config: ~/.claude/.cross-claude-bus (CC_TOKEN + optional CC_BASE pin). The leader address is
+// Config: ~/.claude/.crosstalk (legacy .cross-claude-bus honoured) (CC_TOKEN + optional CC_BASE pin). The leader address is
 // DISCOVERED (loopback/LAN/tailnet), so the Monitor command is just `node cc-poll.mjs <id>` with
 // no IP and no secret on the command line.
 const cfg = loadConfig();

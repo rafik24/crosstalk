@@ -153,7 +153,7 @@ the notification edge.)
 
 ## How discovery + authority works
 
-Authority is a monotonic **epoch** persisted in `~/.cross-claude-mcp/epoch` next to the DB
+Authority is a monotonic **epoch** persisted in `~/.crosstalk/epoch` next to the DB
 and **carried with the DB on migration**. `GET /cc/whoami` (unauthenticated — advertises
 host/epoch/base plus a data **watermark** and the running code **rev**, never a secret) is the
 beacon. Discovery merges every responder and picks the winner by the single `outranks()`
@@ -191,7 +191,7 @@ The bus is only as available as the hosts running a supervisor. To stop the "sol
 bus blacks out until someone hand-runs `cc-bus start`" outage:
 
 - **`cc-bus ensure`** starts a supervisor on this box **only if one is not already running here**
-  (idempotent). Liveness is a heartbeat file (`~/.cross-claude-mcp/supervisor.json`) checked by a
+  (idempotent). Liveness is a heartbeat file (`~/.crosstalk/supervisor.json`) checked by a
   fresh timestamp **and** a live pid (`process.kill(pid,0)`, cross-platform), and an atomic lock
   serializes concurrent session-starts so **exactly one** supervisor runs per machine. It is fast
   (no network) and fail-soft.
@@ -395,7 +395,7 @@ no bridge daemon, no forked receiver. The design was settled live with a pi sess
 - **`src/pi/crosstalk.ts`** — the only pi-runtime file. pi's extension host loads it (default
   export `(pi) => {}`), and it dynamic-imports the real logic **in-process** from the checkout
   (`CC_LIVE`), so pi runs the exact same `cc-receive.mjs` engine as everyone. Install: set
-  `CC_LIVE=/path/to/cross-claude-client`, copy/symlink the file to `~/.pi/agent/extensions/`
+  `CC_LIVE=/path/to/crosstalk`, copy/symlink the file to `~/.pi/agent/extensions/`
   (or `pi -e <file>`).
 - **`src/pi/crosstalk-core.mjs`** — the host-agnostic wiring (unit-tested against a fake `pi` +
   the real engine + a real server): `pi.on('session_start')` → `createReceiver` with an

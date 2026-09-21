@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// cc-send.mjs — send one message to the Cross-Claude bus. Zero deps.
-// Reads ~/.claude/.cross-claude-bus for CC_BASE + CC_TOKEN (override with flags/env).
+// cc-send.mjs — send one message to the Crosstalk bus. Zero deps.
+// Reads ~/.claude/.crosstalk (legacy .cross-claude-bus still honoured) for CC_BASE + CC_TOKEN (override with flags/env).
 //
 //   node cc-send.mjs <sender_id> <channel|all> "message" [--type status|message|request|response|handoff|done]
 //   node cc-send.mjs winbox/reclaim-offline all "rebased onto main abc1234"

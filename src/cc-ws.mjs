@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// cc-ws.mjs — real-time PUSH receiver for the Cross-Claude bus (issue #3).
+// cc-ws.mjs — real-time PUSH receiver for the Crosstalk bus (issue #3).
 //
 // Supersedes cc-poll.mjs's 2-second poll loop: this holds a WebSocket open to the
 // leader and is woken the instant a message addressed to it is sent — no counter,

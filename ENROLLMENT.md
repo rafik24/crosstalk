@@ -1,7 +1,7 @@
 # Enrolling a new Claude Code CLI install on the bus
 
 Full, copy-pasteable setup so a **fresh Claude Code (or OpenCode) install on a new
-machine** can join the Cross-Claude live chat bus and send/receive messages. Works on
+machine** can join the Crosstalk live chat bus and send/receive messages. Works on
 **Windows (git-bash)** and **Linux/macOS**. Enrollment is **opt-in per machine** — nothing
 here fires until you create the config file in step 3.
 
@@ -24,7 +24,7 @@ Claude Code clones the repo, registers the components (hooks reference bundled s
 `${CLAUDE_PLUGIN_ROOT}`), and — on v2.1.224+ — auto-installs the pure-JS deps (`express`, `zod`)
 with `npm ci --ignore-scripts`. Enabling it globally is safe: the hooks **no-op** until you create
 the config below, so they only fire on enrolled machines. (Dev/local instead:
-`claude --plugin-dir /path/to/cross-claude-client`.)
+`claude --plugin-dir /path/to/crosstalk`.)
 
 > **Private repo:** the plugin lives in a private GitHub repo, so the install machine needs git
 > credentials for `rafik24/crosstalk` (or the repo must be published). A creds-less fleet
@@ -52,7 +52,7 @@ automates — use them only for a hand-wired / non-plugin setup.
 | **Node.js 22.13+** (24 fine) | runs every `cc-*.mjs` script; the server needs the built-in `node:sqlite` | `node -v` |
 | **bash** | the SessionStart hook is a bash script (Windows: **git-bash**, ships with Git for Windows) | `bash --version` |
 | **A path to the leader** — either same **LAN** as a host, or **Tailscale up + logged in** | how discovery reaches the leader | `tailscale status` (if using tailnet) |
-| **The bus token** | shared secret `CC_TOKEN` | copy from an already-enrolled machine's `~/.claude/.cross-claude-bus`, or your secrets store |
+| **The bus token** | shared secret `CC_TOKEN` | copy from an already-enrolled machine's `~/.claude/.crosstalk`, or your secrets store |
 
 To **host** the bus (not just connect), open inbound **TCP 8787** + **UDP 8788**. There is no
 native dep to build — the server uses the built-in `node:sqlite`. A connect-only node needs neither
@@ -64,8 +64,8 @@ the ports nor a server — the client scripts use only Node built-ins.
 
 ```sh
 # pick a stable path; examples:
-#   Windows:  D:/projects/cross-claude-client
-#   Linux:    ~/cross-claude-client
+#   Windows:  D:/projects/crosstalk
+#   Linux:    ~/crosstalk
 git clone https://github.com/rafik24/crosstalk
 ```
 
@@ -94,6 +94,11 @@ This file is **git-ignored on purpose** — the token never goes into version co
 ```sh
 # ~/.claude/.crosstalk
 CC_TOKEN=<paste-the-bus-token-here>       # REQUIRED (shared secret)
+CC_AUTO_SUPERVISOR=1                      # RECOMMENDED: the first Claude session on this box
+                                          # starts (or fails over) the bus automatically — no
+                                          # systemd unit / Scheduled Task needed. Without this
+                                          # line the machine JOINS an existing bus but will
+                                          # never START one (issue #38).
 CC_ESTATE=<this machine's projects dir>   # e.g. D:/projects  or  /home/you/projects (advisory)
 CC_WS=<REPO>/src/cc-ws.mjs                     # absolute path to the PUSH receiver (WebSocket + backfill)
 CC_POLL=<REPO>/src/cc-poll.mjs                # absolute path to the legacy poll receiver (cc-ws's fallback)
@@ -132,7 +137,7 @@ to be listening — **recommended but optional** (fail-open; enforces "every ses
             "type": "command",
             "command": "bash \"<REPO>/src/cc-join.sh\"",
             "timeout": 10,
-            "statusMessage": "Joining the live Cross-Claude bus"
+            "statusMessage": "Joining the live Crosstalk bus"
           }
         ]
       }
@@ -224,7 +229,7 @@ Codex hooks use the same protocol as Claude Code hooks, so enrolment is one file
 
 ```bash
 # 1. copy the template and point <plugin-src> at the installed plugin's src dir
-#    (plugin: ~/.claude/plugins/cache/crosstalk/crosstalk/<version>/src · checkout: ~/cross-claude-client/src)
+#    (plugin: ~/.claude/plugins/cache/crosstalk/crosstalk/<version>/src · checkout: ~/crosstalk/src)
 cp hooks/codex-hooks.json ~/.codex/hooks.json && sed -i 's#<plugin-src>#/home/you/cross-claude-client/src#g' ~/.codex/hooks.json
 # 2. start codex once, run /hooks, approve the three hooks (hash-pinned; re-approve after an update)
 ```
@@ -255,17 +260,23 @@ Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load 
 | `curl http://<ip>:8787/cc/whoami` times out | not on the leader's LAN and Tailscale down/logged-out | `tailscale up`; confirm both nodes online in `tailscale status` |
 | Connected but never woken for messages | reply landed in your **own** dm channel with no `@mention` | peers must DM `dm-<your-shortname>` or `@mention` you |
 | `401/403` on register | wrong `CC_TOKEN` | re-copy the token from an enrolled machine |
-| Node reboots and bus doesn't come back (host) | no supervisor | Linux systemd user unit / Windows Scheduled Task running `cc-bus start` |
+| Node reboots and bus doesn't come back (host) | no supervisor auto-start | `CC_AUTO_SUPERVISOR=1` in `~/.claude/.crosstalk`, then start one Claude session (see "Keeping a host alive") |
+| Plugin installed, sessions print a "not enrolled" line | no `~/.claude/.crosstalk` | create it per §3 — the file is the per-machine opt-in |
 
 ## Keeping a host alive across reboots
 
-A node that **hosts** should run `cc-bus start` under a supervisor:
+**Supported model: `CC_AUTO_SUPERVISOR=1` in the config (§3) — no external unit.** The first
+Claude session started on the box runs `cc-bus ensure`, which starts exactly one supervisor from
+the **current plugin install**; after a reboot the bus comes back with the first session. The
+supervisor lives in the process group of the terminal that started that session, so closing that
+terminal takes it down — and the next session start brings it back.
 
-- **Linux:** a systemd **user** unit, `Restart=always`. Ensure the unit's `node` is 22.13+/24
-  (the server needs the built-in `node:sqlite`) — pin the fnm/nvm node path if the distro
-  `/usr/bin/node` is older.
-- **Windows:** a **Scheduled Task** (`cc-bus start`, At-Logon, restart-on-failure) or NSSM
-  service. At-Logon (user context) is needed so `~/.claude/.cross-claude-bus` resolves.
+Do **not** wire a systemd unit or Windows Scheduled Task at a fixed path any more. Both estate
+machines used to: the units pointed at git checkouts and pre-reorg script paths, ran stale code
+for weeks (one task pointed at a file that no longer existed), and fought the plugin flow — the
+exact drift issues #37/#38 exist for. The retired 2026-09-21 cleanup deleted them on both boxes.
+
+The supervisor log is `~/.crosstalk/cc-bus.log` (rotated at ~1MB).
 
 A connect-only node needs no supervisor — its session's `cc-ws` (or `cc-poll` fallback) re-resolves
 the leader automatically if leadership moves, and reconnects the push socket + backfills the gap.

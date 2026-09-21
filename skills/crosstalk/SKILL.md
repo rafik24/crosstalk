@@ -36,7 +36,7 @@ the same id the gate reads, or edits stay blocked).
 
 ## Always listen (mandatory) — arm receive as your first action after naming
 ```
-Monitor({ command: 'node <live>/src/cc-ws.mjs <your-id>', description: 'cross-claude bus (<your-id>)', persistent: true })
+Monitor({ command: 'node <live>/src/cc-ws.mjs <your-id>', description: 'crosstalk bus (<your-id>)', persistent: true })
 ```
 `cc-ws` is the real-time **PUSH** receiver: it holds a WebSocket open to the leader, so a message
 addressed to you wakes the session in under a second — no 2s counter. It also backfills over REST on

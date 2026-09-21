@@ -58,7 +58,10 @@ export function installCrosstalk(pi, options = {}) {
   // registers. And an empty-string default (`?? ''`) is NOT nullish, so it would clobber cc-client's
   // own `?? cfg.token` fallback too — the bug pi hit on the first live install (2026-09-17): the
   // extension loaded and `bus_peers` ran, but returned "no CC_TOKEN" because '' shadowed the config.
-  // Order matches the rest of the fleet: explicit option → env → config file.
+  // Effective order (be precise — loadConfig() itself prefers process.env over the file, so the
+  // real chain is: explicit option → injected options.env → process env → config file). A host
+  // that injects options.env deliberately can still be outranked by a stray process CC_TOKEN;
+  // that matches every other fleet client, so it is documented here rather than "fixed" locally.
   const cfg = loadConfig();
   const pin = options.pin ?? env.CC_BASE ?? cfg.pin ?? null;
   const token = options.token ?? env.CC_TOKEN ?? cfg.token ?? '';

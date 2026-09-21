@@ -51,6 +51,11 @@ function resolveConfig(opts = {}) {
     allowNoAuth: opts.allowNoAuth === true || env.CC_ALLOW_NO_AUTH === '1',
     epoch: Number(opts.epoch ?? env.CC_EPOCH ?? 0),
     host: opts.host ?? env.CC_HOST ?? os.hostname(),
+    // Where the .stepdown marker lands (issue #34); the supervisor passes CC_DATA_DIR. Unset ⇒ no marker.
+    dataDir: opts.dataDir ?? env.CC_DATA_DIR ?? null,
+    // /cc/stepdown ends the PROCESS (not just the listener) — true for a real spawned server; tests
+    // that start the server in-process pass false (default) so a stepdown never kills the test run.
+    exitOnStepdown: opts.exitOnStepdown === true || env.CC_STEPDOWN_EXIT === '1',
     baseUrl: opts.baseUrl ?? env.SERVER_URL ?? null,
     cleanupDays: Number(opts.cleanupDays ?? env.CLEANUP_DAYS ?? 7),
     // SQLite is the only backend; snapshot/export rides its online backup.
@@ -347,10 +352,27 @@ export async function startServer(opts = {}) {
   });
 
   // Graceful step-down for the migration/election flow: ack, then wind down.
+  // Issue #34: this used to only call close(), which (a) never resolved while a WS client was
+  // attached (closeAllConnections skips upgraded sockets) and (b) never exited the process even
+  // when it did — leaving a listener-less zombie holding the DB and a supervisor stuck "leader".
+  // Now: write the .stepdown marker (the supervisor's child.on('exit') reads it to demote to
+  // CLIENT instead of re-electing — cc-bus.mjs always EXPECTED the server to write it, but
+  // nothing ever did, so a REMOTELY-triggered stepdown re-elected at an epoch tie), tear down
+  // the hub, then exit — on close() resolving or a 2s deadline, whichever comes first.
   app.post('/cc/stepdown', requireAdmin, (_req, res) => {
     res.json({ ok: true });
+    if (config.dataDir) {
+      try { fs.writeFileSync(path.join(config.dataDir, '.stepdown'), String(Date.now())); } catch {}
+    }
     // Let the response flush before we tear the listener down.
-    setTimeout(() => { close().catch(() => {}); }, 50);
+    setTimeout(() => {
+      const done = close().catch(() => {});
+      if (config.exitOnStepdown) {
+        const bye = () => process.exit(0);
+        done.then(bye, bye);
+        setTimeout(bye, 2000).unref?.();   // deadline: never leave a zombie if close() hangs
+      }
+    }, 50);
   });
 
   // Server-level fallback error handler (the REST router has its own; this covers /cc/* and
@@ -397,7 +419,9 @@ export async function startServer(opts = {}) {
         try { db.db?.close?.(); } catch { /* ignore close races */ }
         resolve();
       });
-      // Nudge any lingering keep-alive/WS sockets so close() actually resolves.
+      // Nudge lingering keep-alive sockets AND tear down upgraded WS sockets — closeAllConnections
+      // does not touch the latter, and one live WS client used to keep close() pending forever (#34).
+      try { hub.destroy(); } catch {}
       server.closeAllConnections?.();
     });
     return closing;
@@ -432,7 +456,7 @@ export async function startServer(opts = {}) {
 const invokedDirectly =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
-  startServer().catch((e) => {
+  startServer({ exitOnStepdown: true }).catch((e) => {
     console.error('[crosstalk] failed to start:', e);
     process.exit(1);
   });

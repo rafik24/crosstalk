@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
 // cc-work.mjs — the Crosstalk coordination board. Zero deps.
-// Reads ~/.claude/.cross-claude-bus for CC_BASE + CC_TOKEN (override with flags/env).
+// Reads ~/.claude/.crosstalk (legacy .cross-claude-bus still honoured) for CC_BASE + CC_TOKEN (override with flags/env).
 //
 // A work item has an OWNER (the live session id holding it) and a STATE
 // (queued → claimed → implementing → in-review → merged → deployed, plus blocked/abandoned).
