@@ -7,7 +7,9 @@
 //
 //   T1  join: lanes register + listen; their liveness beacons land in the SCRATCH home
 //   T2  addressing: ambient #general wakes nobody; a DM wakes only its target; @all wakes all
-//   T3  the claim-lock: two lanes race ONE work item → exactly one 200, the other 409
+//   T3  the claim-lock contract: of two lanes — then of 8 simultaneous raw claims — on ONE item,
+//       exactly one wins and every loser is told who holds it (atomicity under real contention
+//       is the job of db.test; this proves the wire contract the lanes rely on)
 //   T4  handoff → ACK → done: the board handoff wakes the new owner »HANDOFF — ACK REQUIRED«,
 //       the ack rides a `response` starting "ACK", a non-owner's state change is refused (403),
 //       the owner's lands, and `done` is a distinct message type
@@ -25,7 +27,7 @@ for (const k of ['CC_TOKEN', 'CC_BASE', 'CC_PIN', 'CC_PEERS', 'CC_ADMIN_KEY', 'C
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dev = (f) => import(pathToFileURL(join(__dirname, '..', 'dev', f)).href);
-const { Fleet } = await dev('fleet.mjs');
+const { Fleet, fileId, cleanupOnSignal } = await dev('fleet.mjs');
 const { FakeLane } = await dev('fake-lane.mjs');
 
 const SLOT = parseInt(process.env.CC_FLEET_SLOT) || 8;
@@ -37,6 +39,7 @@ const ok = (cond, msg) => { if (!cond) { failed = true; console.error('  ✗', m
 
 const f = new Fleet({ slot: SLOT, dir: join(SCRATCH, 'fleet') });
 const lanes = [];
+cleanupOnSignal(() => [...lanes, f]);
 const lane = (identity, node, opts = {}) => {
   const l = new FakeLane(identity, { env: f.nodeEnv(node), home: join(SCRATCH, 'home-' + identity.replace(/\W+/g, '_')), ...opts });
   lanes.push(l); return l;
@@ -85,6 +88,15 @@ try {
   ok(statuses === '200,409', `exactly one claim won, the other got 409 (${ca.status} / ${ci.status})`);
   const [winner, loser, lost] = ca.ok ? [app, infra, ci] : [infra, app, ca];
   ok(lost.body?.reason === 'already_claimed' && lost.body?.owner === winner.identity, `the loser was told who holds it (${lost.body?.owner})`);
+  {
+    // 8 claims fired from ONE process straight at the leader, all in flight together.
+    const c2 = await po.rest('POST', '/api/work', { title: 'T3 stampede item', kind: 'task', created_by: po.identity });
+    const id2 = c2.body?.item?.id;
+    const L = await f.leader();
+    const rs = await Promise.all(Array.from({ length: 8 }, (_, k) => fetch(`${f.baseUrl(L.i)}/api/work/${id2}/claim`, { method: 'POST', headers: f.headers(L.version), body: JSON.stringify({ owner: `node0/racer-${k}` }) })));
+    const won = rs.filter((r) => r.status === 200).length, lostN = rs.filter((r) => r.status === 409).length;
+    ok(won === 1 && lostN === 7, `8 simultaneous claims → exactly 1 winner, 7× 409 (got ${won} / ${lostN})`);
+  }
 
   // --- T4 ---------------------------------------------------------------------------------------
   console.log('T4 handoff → ACK → done');
@@ -94,6 +106,7 @@ try {
   ok(ho.ok && ho.body?.item?.owner === loser.identity, `owner handed #${wid} to ${loser.identity}`);
   const wake = await loser.waitMsg((m) => m.message_type === 'handoff' && m.content.includes(`work #${wid}`));
   ok(wake && wake.handoff, 'the new owner was woken »HANDOFF — ACK REQUIRED«');
+  await sleep(500);   // a late self-echo must have had time to arrive before we call it absent
   ok(got(winner, new RegExp(`work #${wid}`)).length === 0, 'the handoff notice did not wake the lane that sent it');
   const ack = await loser.ack('all', `work #${wid}`);
   ok(ack.ok, 'ack posted');
@@ -111,9 +124,13 @@ try {
   // the client's fixed 15s tick (issue 43), so anything newer than the last tick is legitimately
   // lost on an unclean kill — this test is about lanes surviving a failover, not that bound.
   {
-    const { fileId } = await dev('fleet.mjs');
-    const before = fileId(f.replicaPath(1))?.mtimeMs ?? 0;
-    ok(await f.waitFor(() => (fileId(f.replicaPath(1))?.mtimeMs ?? 0) > before, 40000, 200), 'a replication pull landed after the T4 writes');
+    // TWO advances: the first may be a pull that STARTED before the last T4 write and merely
+    // finished after we sampled; the second is guaranteed to have started after it.
+    const client = (await f.leader()).i === 0 ? 1 : 0;
+    let last = fileId(f.replicaPath(client))?.mtimeMs ?? 0, seen = 0;
+    ok(await f.waitFor(() => { const m = fileId(f.replicaPath(client))?.mtimeMs ?? 0; if (m > last) { last = m; seen++; } return seen >= 2; }, 60000, 100), `two replication pulls landed on node${client} after the T4 writes`);
+    const bad = f.hermeticityViolations();
+    ok(bad.length === 0, `hermetic: loopback-only listeners, no foreign leader cached${bad.length ? ' — ' + bad.join('; ') : ''}`);
   }
   const killed = await f.killLeader({ clean: false });
   const nl = await f.waitSingleLeader({ timeoutMs: 60000, minEpoch: (killed?.epoch || 1) + 1 });

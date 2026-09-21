@@ -16,17 +16,23 @@
 //     { id, op: 'send', channel, content, type? }      post a message (channel 'all' → general)
 //     { id, op: 'ack',  channel, note }                the cc-ack contract: response "ACK — …"
 //     { id, op: 'done', channel, content }             type=done
-//     { id, op: 'rest', method, path, body? }          any /api call as this lane (work board…)
+//     { id, op: 'rest', method, path, body? }          an /api/… call as this lane (work board…);
+//                                                      any other path is refused — the bearer
+//                                                      token must never follow a driver-supplied
+//                                                      URL off the bus (a MODEL may be the driver)
 //     { id, op: 'stop' }
 //   child → parent (stdout, one JSON per line)
 //     { ev: 'ready', identity, base }                  receiver started (registered + listening)
+//     { ev: 'error', error }                           could not start (no leader found…)
 //     { ev: 'msg', msg, addressed, handoff, rendered } one per message the engine delivers
 //     { ev: 'result', id, ok, status, body }           reply to a command
 //     { ev: 'log', line }                              engine lifecycle (leader changes, push up/down)
 //     { ev: 'gate', text, info }                       the bus refused this lane's version (426)
 //
-// Isolation: spawn it with Fleet.nodeEnv(i) (or any hermetic env) — FakeLane also redirects
-// HOME/USERPROFILE so the liveness beacon lands in the scratch dir, never the real ~/.claude.
+// Commands are executed strictly IN ORDER (an `ack` then a `done` written back to back land in
+// that order). Isolation: spawn it with Fleet.nodeEnv(i); FakeLane REFUSES an env that is not
+// visibly hermetic (scratch config + cache, a pinned non-estate port, an explicit token) and
+// redirects HOME/USERPROFILE so the liveness beacon lands in the scratch dir, never ~/.claude.
 // ---------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -45,9 +51,15 @@ export class FakeLane {
   // srcRoot: run the lane from ANOTHER checkout (a lane on a different release → version gate).
   constructor(identity, { env, home, firehose = false, fromStart = false, srcRoot = null } = {}) {
     if (!identity || !env || !home) throw new Error('FakeLane: identity, env and home are required');
+    // `{...process.env}` on an enrolled box would carry a real CC_TOKEN and default to :8787 — the
+    // lane would then register on the PRODUCTION bus. Refuse anything not visibly hermetic.
+    for (const k of ['CC_BUS_CONFIG', 'CC_CACHE_DIR', 'CC_PORT', 'CC_TOKEN']) if (!env[k]) throw new Error(`FakeLane: env.${k} is required (use Fleet.nodeEnv(i))`);
+    if (Number(env.CC_PORT) === 8787) throw new Error('FakeLane: refusing CC_PORT=8787 (the estate bus)');
     this.identity = identity;
     this.inbox = [];          // every delivered message event, in order
     this.logs = [];
+    this.noise = [];         // stdout lines that were not protocol JSON (should stay empty)
+    this.error = null;
     this.gate = null;
     this.base = null;
     this.exit = null;         // { code, signal } once the child is gone
@@ -64,11 +76,12 @@ export class FakeLane {
     this.child.stderr.on('data', (d) => { this.stderr += d; });
     this.child.on('exit', (code, signal) => { this.exit = { code, signal }; this.#wake(); });
     createInterface({ input: this.child.stdout }).on('line', (line) => {
-      let e; try { e = JSON.parse(line); } catch { return; }
+      let e; try { e = JSON.parse(line); } catch { this.noise.push(line); return; }
       if (e.ev === 'msg') this.inbox.push(e);
       else if (e.ev === 'log') this.logs.push(e.line);
       else if (e.ev === 'ready') this.base = e.base;
       else if (e.ev === 'gate') this.gate = e;
+      else if (e.ev === 'error') this.error = e.error;
       else if (e.ev === 'result') { const p = this.#pending.get(e.id); if (p) { this.#pending.delete(e.id); p(e); } }
       this.#wake();
     });
@@ -86,9 +99,18 @@ export class FakeLane {
       check();
     });
   }
-  ready(timeoutMs = 20000) { return this.until(() => this.base || this.gate || this.exit, timeoutMs).then(() => !!this.base); }
+  ready(timeoutMs = 20000) { return this.until(() => this.base || this.gate || this.error || this.exit, timeoutMs).then(() => !!this.base); }
   // First inbox message matching `match` (a predicate over the raw bus message), or null.
   waitMsg(match, timeoutMs = 15000) { return this.until(() => this.inbox.find((e) => match(e.msg, e)) || null, timeoutMs); }
+  // CONSUMING read for an agent loop: the oldest not-yet-taken message (optionally matching), so a
+  // loop answers each message once instead of re-finding the first match forever.
+  #taken = 0;
+  takeMsg(match = () => true, timeoutMs = 15000) {
+    return this.until(() => {
+      for (let k = this.#taken; k < this.inbox.length; k++) if (match(this.inbox[k].msg, this.inbox[k])) { this.#taken = k + 1; return this.inbox[k]; }
+      return null;
+    }, timeoutMs);
+  }
 
   #cmd(op, fields = {}, timeoutMs = 15000) {
     const id = ++this.#seq;
@@ -122,6 +144,7 @@ async function child(argv) {
   const { createReceiver } = await imp('cc-receive.mjs');
   const { resolveFast, loadConfig } = await imp('cc-discover.mjs');
   const { pkgVersion } = await imp('cc-rev.mjs');
+  const { addressedTo } = await imp('cc-render.mjs');
 
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
   const cfg = loadConfig();
@@ -130,7 +153,7 @@ async function child(argv) {
   const rx = createReceiver({
     instance: identity, token: cfg.token, pin: cfg.pin,
     firehose: flag('--all'), fromStart: flag('--from-start'), desc: 'fake-lane',
-    emit: (rendered, msg) => out({ ev: 'msg', msg, rendered, addressed: / »(TO YOU|HANDOFF|@ALL)/.test(rendered), handoff: rendered.includes('»HANDOFF — ACK REQUIRED«') }),
+    emit: (rendered, msg) => { const addressed = addressedTo(msg, identity); out({ ev: 'msg', msg, rendered, addressed, handoff: addressed && msg.message_type === 'handoff' }); },
     log: (line) => out({ ev: 'log', line }),
     onVersionGate: (text, info) => { out({ ev: 'gate', text, info }); setTimeout(() => process.exit(3), 50); },
   });
@@ -140,14 +163,22 @@ async function child(argv) {
   async function api(method, path, body) {
     const leader = await resolveFast({ pin: cfg.pin, token: cfg.token });
     if (!leader) return { ok: false, status: 0, body: { error: 'no bus leader found' } };
-    const r = await fetch(leader.base + path, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
+    // Never let a driver-supplied path steer the bearer token off the bus: 'http://127.0.0.1:9010'
+    // + '@evil.example/x' parses as host evil.example. Resolve, then insist on origin + /api/.
+    const url = new URL(path, leader.base + '/');
+    if (typeof path !== 'string' || !path.startsWith('/api/') || url.origin !== new URL(leader.base).origin) {
+      return { ok: false, status: 0, body: { error: 'fake-lane: only /api/… paths on the bus leader are allowed' } };
+    }
+    const r = await fetch(url, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10000) });
     let parsed = null; try { parsed = await r.json(); } catch {}
     return { ok: r.ok, status: r.status, body: parsed };
   }
   const post = (channel, content, message_type) =>
     api('POST', '/api/messages', { channel: channel === 'all' ? 'general' : channel, sender: identity, content, message_type });
 
-  createInterface({ input: process.stdin }).on('line', async (line) => {
+  let chain = Promise.resolve();   // strictly ordered: command N+1 starts after N has answered
+  createInterface({ input: process.stdin }).on('line', (line) => { chain = chain.then(() => handle(line)).catch(() => {}); });
+  async function handle(line) {
     let c; try { c = JSON.parse(line); } catch { return; }
     let res;
     try {
@@ -159,11 +190,12 @@ async function child(argv) {
       else res = { ok: false, status: 0, body: { error: 'unknown op ' + c.op } };
     } catch (e) { res = { ok: false, status: 0, body: { error: String(e && e.message || e) } }; }
     out({ ev: 'result', id: c.id, ...res });
-  });
+  }
   process.stdin.on('end', () => { rx.stop(); process.exit(0); });   // parent died → never linger
 
   await rx.start();
   if (rx.base) out({ ev: 'ready', identity, base: rx.base });
+  else out({ ev: 'error', error: 'no bus leader found at start (the receiver keeps retrying)' });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

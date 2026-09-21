@@ -11,6 +11,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: the suite needs to read the repo and nothing else (fork PRs get no secrets).
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

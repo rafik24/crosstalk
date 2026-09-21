@@ -9,9 +9,10 @@
 // promote. Scenario ids are the QA-program ids (tracking issue 42):
 //
 //   F0  importing the harness from a script named *fleet.mjs does NOT run its CLI
-//   F1  2-node boot → exactly one leader, the other a settled client, message round trip
-//   L2a client replication lands in messages.db.replica (never over a messages.db); the leader's
-//       DB inode is stable across 3 replication cycles
+//   F1  2-node boot → exactly one leader, the other a settled client, message round trip;
+//       HERMETIC: every fleet listener is bound to 127.0.0.1 only and no node cached a leader
+//       outside the fleet (an all-interfaces bind once let two boxes' fleets elect each other)
+//   L2a client replication lands in messages.db.replica over 3 cycles, never in a messages.db
 //   L3  UNCLEAN leader kill → survivor adopts the replica and promotes at epoch+1; a message
 //       written a full cycle before the kill is present; integrity_check ok; no orphan listener
 //   L3r the dead ex-leader restarts → rejoins as CLIENT, the promoted leader keeps the term
@@ -21,7 +22,8 @@
 // Judged by /cc/whoami + pid liveness, never supervisor.json alone (it lags and survives a kill).
 // Slow by nature: a client's failover check AND its replication pull both ride one fixed 15s tick
 // (cc-bus runClient), so a promotion costs ~15–20s and the effective replication period is
-// max(15s, CC_REPLICATE_MS) — CC_REPLICATE_MS below 15s only guarantees "every tick".
+// CC_REPLICATE_MS rounded UP to a whole number of ticks — below 15s it only means "every tick"
+// (issue 43).
 // ---------------------------------------------------------------------------
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
@@ -35,7 +37,7 @@ for (const k of ['CC_TOKEN', 'CC_BASE', 'CC_PIN', 'CC_PEERS', 'CC_ADMIN_KEY', 'C
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FLEET_MJS = join(__dirname, '..', 'dev', 'fleet.mjs');
-const { Fleet, fileId, listenerPid, pidAlive } = await import(pathToFileURL(FLEET_MJS).href);
+const { Fleet, fileId, listeners, listenerPid, pidAlive, cleanupOnSignal } = await import(pathToFileURL(FLEET_MJS).href);
 
 const SLOT = parseInt(process.env.CC_FLEET_SLOT) || 7;
 const SCRATCH = mkdtempSync(join(tmpdir(), 'ccfleet-'));
@@ -46,6 +48,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = false;
 const ok = (cond, msg) => { if (!cond) { failed = true; console.error('  ✗', msg); } else { console.log('  ✓', msg); } };
 const fleets = [];
+cleanupOnSignal(() => fleets);   // Ctrl-C / CI cancel must not leave supervisors holding the slot
 const mkFleet = (name, opts = {}) => { const f = new Fleet({ slot: SLOT, dir: join(SCRATCH, name), replicateMs: REPLICATE_MS, ...opts }); fleets.push(f); return f; };
 
 // Wait until `path`'s mtime has advanced `n` times (n completed replication writes).
@@ -68,8 +71,13 @@ try {
   // --- F1 ---------------------------------------------------------------------------------------
   console.log('F1 boot');
   const f = mkFleet('main');
-  ok(f.port(0) !== 8787 && f.port(1) !== 8787 && f.beaconPort !== 8788, `fleet ports (${f.port(0)},${f.port(1)}, udp ${f.beaconPort}) are not the estate's`);
   const l0 = await f.up();
+  {
+    const ls = listeners(f.port(0));
+    ok(ls.length >= 1, `the listener probe SEES the leader's socket on :${f.port(0)} (${ls.map((l) => `${l.addr} pid ${l.pid}`).join(', ') || 'nothing — the hermeticity checks below would be vacuous'})`);
+    const bad = f.hermeticityViolations();
+    ok(bad.length === 0, `hermetic: loopback-only listeners, no foreign leader cached${bad.length ? ' — ' + bad.join('; ') : ''}`);
+  }
   ok(l0.i === 0 && l0.epoch === 1 && l0.host === 'node0', `node0 leads at epoch 1 (got node${l0.i}@${l0.epoch})`);
   ok((await f.leaders()).length === 1, 'exactly one node answers as leader');
   ok(await f.settled(1) && !(await f.whoami(1)), 'node1 is a settled CLIENT and serves nothing');
@@ -78,22 +86,20 @@ try {
 
   // --- L2a --------------------------------------------------------------------------------------
   console.log('L2a replication target + leader DB identity');
-  const dbBefore = fileId(f.dbPath(0));
   ok(await waitCycles(f, f.replicaPath(1), 3), 'node1 completed 3 replication cycles into messages.db.replica');
   ok(!existsSync(f.dbPath(1)), 'the client never materialised a messages.db of its own (replica only)');
-  const dbAfter = fileId(f.dbPath(0));
-  ok(dbBefore && dbAfter && dbBefore.ino === dbAfter.ino, `leader messages.db inode stable across the cycles (${dbBefore?.ino} → ${dbAfter?.ino})`);
 
   // --- L3 ---------------------------------------------------------------------------------------
   console.log('L3 unclean leader kill → promotion on the replica');
   const oldServerPid = listenerPid(f.port(0));
   const oldSupPid = f.nodes[0].pid;
+  ok(oldServerPid > 0 && oldServerPid !== oldSupPid && pidAlive(oldServerPid), `pre-kill: server child pid ${oldServerPid} is a live process distinct from supervisor pid ${oldSupPid}`);
   const tKill = Date.now();
   await f.killLeader({ clean: false });
   const l1 = await f.waitSingleLeader({ timeoutMs: 60000, minEpoch: 2 });
   const promoteMs = Date.now() - tKill;
   ok(l1 && l1.i === 1 && l1.epoch === 2, `node1 promoted to leader@2 (got ${l1 ? `node${l1.i}@${l1.epoch}` : 'none'}) in ${promoteMs} ms`);
-  ok(!pidAlive(oldSupPid) && !listenerPid(f.port(0)), `no orphan: old supervisor pid ${oldSupPid} and old server pid ${oldServerPid} are gone, :${f.port(0)} closed`);
+  ok(!pidAlive(oldSupPid) && !pidAlive(oldServerPid) && listeners(f.port(0)).length === 0, `no orphan: old supervisor pid ${oldSupPid} AND old server pid ${oldServerPid} are dead, :${f.port(0)} closed`);
   ok(/adopted the replicated snapshot/.test(f.log(1)), 'node1 logged the replica adoption at promotion');
   ok(!/replica adoption FAILED/.test(f.log(1)), 'no adoption-failure warning');
   const after = await f.messages('fleet');
@@ -115,6 +121,7 @@ try {
   ok(l2 && l2.i === 1 && l2.epoch === 2, `node1 still the single leader@2 after node0 came back (got ${l2 ? `node${l2.i}@${l2.epoch}` : 'none/split'})`);
   ok(!(await f.whoami(0)), 'node0 serves nothing — it rejoined as a client, it did not re-take the term');
   ok((await f.messages('fleet')).length === 2, 'history intact (2 messages) after the rejoin');
+  { const bad = f.hermeticityViolations(); ok(bad.length === 0, `still hermetic after failover + rejoin${bad.length ? ' — ' + bad.join('; ') : ''}`); }
   await f.destroy();
 
   // --- L2b --------------------------------------------------------------------------------------
@@ -130,6 +137,8 @@ try {
   // A client pulls once IMMEDIATELY on entering client mode, then on every tick: wait out both.
   await sleep(CLIENT_TICK_MS + 3000);
   ok(!existsSync(g.replicaPath(0)), 'same-host client never pulled a snapshot across its immediate pull + one tick (no messages.db.replica in the shared dir)');
+  // (The inode check bites only where rename-over-an-open-file succeeds — POSIX, and only for the
+  // pre-3.3.3 form of the bug. The replica-file assertion above is the portable issue-35 detector.)
   const idAfter = fileId(g.dbPath(0));
   ok(idBefore && idAfter && idBefore.ino === idAfter.ino, `shared messages.db inode untouched (${idBefore?.ino} → ${idAfter?.ino})`);
   const hist = await g.messages('fleet');
