@@ -146,6 +146,16 @@ try {
   const board = await po.rest('GET', `/api/work/${wid}`);
   ok(board.ok && board.body?.item?.owner === loser.identity && board.body?.item?.state === 'merged', 'work-board state (owner + merged) survived the failover');
 
+  // --- the lane transport must not be steerable out of the data plane (a MODEL may drive it) -----
+  for (const p of ['/api/../cc/stepdown', '/api/%2e%2e/cc/export', '//evil.example/api/x', '/cc/whoami']) {
+    const r = await po.rest('POST', p, {});
+    ok(!r.ok && r.status === 0 && /only \/api\//.test(r.body?.error || ''), `lane refuses rest path ${p}`);
+  }
+  ok((await f.leaders()).length === 1, 'the leader is still up (no smuggled stepdown)');
+
+  for (const l of lanes) await l.stop();
+  { const left = await f.down(); ok(left.length === 0, `teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`); }
+
   if (failed) console.error('❌ turnplay.test FAILED');
   else console.log('✅ turnplay.test: all assertions passed (join, addressing, claim-lock race, handoff→ACK→done, failover continuity)');
 } catch (e) {

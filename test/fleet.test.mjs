@@ -4,8 +4,8 @@
 //
 // Every other suite in this repo is in-process; none ever spawned `cc-bus start`, because on an
 // enrolled box the election would reach the live estate. The fleet harness packages the isolation
-// recipe (scratch config/cache/data per node, pinned non-estate ports, scratch beacon, blanked
-// operator env), so these are the first tests where real supervisors elect, replicate, die and
+// recipe (scratch config/cache/data per node, pinned non-estate ports, scratch beacon, operator
+// env deleted), so these are the first tests where real supervisors elect, replicate, die and
 // promote. Scenario ids are the QA-program ids (tracking issue 42):
 //
 //   F0  importing the harness from a script named *fleet.mjs does NOT run its CLI
@@ -26,7 +26,7 @@
 // (issue 43).
 // ---------------------------------------------------------------------------
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -77,6 +77,11 @@ try {
     ok(ls.length >= 1, `the listener probe SEES the leader's socket on :${f.port(0)} (${ls.map((l) => `${l.addr} pid ${l.pid}`).join(', ') || 'nothing — the hermeticity checks below would be vacuous'})`);
     const bad = f.hermeticityViolations();
     ok(bad.length === 0, `hermetic: loopback-only listeners, no foreign leader cached${bad.length ? ' — ' + bad.join('; ') : ''}`);
+    // Non-vacuity for the cache half: the client MUST have cached its leader, in the SCRATCH cache
+    // dir — if CC_CACHE_DIR stopped being honoured the check above would read zero files and pass.
+    let cached = null;
+    try { cached = JSON.parse(readFileSync(join(f.nodeDir(1), 'cache', 'leader.json'), 'utf8')); } catch {}
+    ok(cached?.base === f.baseUrl(0), `node1 cached its leader in the scratch cache dir (${cached?.base || 'no leader.json'})`);
   }
   ok(l0.i === 0 && l0.epoch === 1 && l0.host === 'node0', `node0 leads at epoch 1 (got node${l0.i}@${l0.epoch})`);
   ok((await f.leaders()).length === 1, 'exactly one node answers as leader');
@@ -122,7 +127,7 @@ try {
   ok(!(await f.whoami(0)), 'node0 serves nothing — it rejoined as a client, it did not re-take the term');
   ok((await f.messages('fleet')).length === 2, 'history intact (2 messages) after the rejoin');
   { const bad = f.hermeticityViolations(); ok(bad.length === 0, `still hermetic after failover + rejoin${bad.length ? ' — ' + bad.join('; ') : ''}`); }
-  await f.destroy();
+  { const left = await f.destroy(); ok(left.length === 0, `teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`); }
 
   // --- L2b --------------------------------------------------------------------------------------
   console.log('L2b same-host second supervisor on the SAME data dir');
@@ -143,7 +148,7 @@ try {
   ok(idBefore && idAfter && idBefore.ino === idAfter.ino, `shared messages.db inode untouched (${idBefore?.ino} → ${idAfter?.ino})`);
   const hist = await g.messages('fleet');
   ok(hist.some((m) => m.id === s1.id), 'leader history intact with the same-host client attached');
-  await g.destroy();
+  { const left = await g.destroy(); ok(left.length === 0, `teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`); }
 
   if (failed) console.error('❌ fleet.test FAILED');
   else console.log(`✅ fleet.test: all assertions passed (F0 import guard, F1 boot, L2a/L2b replication safety, L3 failover in ${promoteMs} ms, L3r rejoin)`);

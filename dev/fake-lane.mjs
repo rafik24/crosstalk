@@ -163,10 +163,12 @@ async function child(argv) {
   async function api(method, path, body) {
     const leader = await resolveFast({ pin: cfg.pin, token: cfg.token });
     if (!leader) return { ok: false, status: 0, body: { error: 'no bus leader found' } };
-    // Never let a driver-supplied path steer the bearer token off the bus: 'http://127.0.0.1:9010'
-    // + '@evil.example/x' parses as host evil.example. Resolve, then insist on origin + /api/.
-    const url = new URL(path, leader.base + '/');
-    if (typeof path !== 'string' || !path.startsWith('/api/') || url.origin !== new URL(leader.base).origin) {
+    // Never let a driver-supplied path steer the bearer token off the bus ('http://127.0.0.1:9010'
+    // + '@evil.example/x' parses as host evil.example) or out of the data plane. Judge the
+    // NORMALISED url — the raw string '/api/../cc/stepdown' starts with /api/ yet resolves to the
+    // admin route, which a loopback fleet accepts with the chat token.
+    const url = new URL(String(path), leader.base + '/');
+    if (!url.pathname.startsWith('/api/') || url.origin !== new URL(leader.base).origin) {
       return { ok: false, status: 0, body: { error: 'fake-lane: only /api/… paths on the bus leader are allowed' } };
     }
     const r = await fetch(url, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10000) });

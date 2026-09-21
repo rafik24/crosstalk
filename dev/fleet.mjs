@@ -118,7 +118,7 @@ export function procCmdline(pid) {
       const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: 'utf8', windowsHide: true });
       return (r.stdout || '').trim();
     }
-    return (spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout || '').trim();
+    return (spawnSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout || '').trim();
   } catch { return ''; }
 }
 
@@ -168,7 +168,9 @@ export class Fleet {
     // Never inherit a pin/token/bind/epoch from the operator's shell. DELETE, don't blank: several
     // reads treat '' as a value (CC_BIND='' → listen on every interface, issue 45).
     for (const k of ['CC_BASE', 'CC_PIN', 'CC_ADMIN_KEY', 'CC_ALLOW_FILE_ORIGIN', 'CC_VERSION_GATE_BYPASS', 'CC_EPOCH', 'PORT',
-      'MCP_API_KEY', 'CC_AUTO_SUPERVISOR', 'CC_ALLOW_NO_AUTH', 'SERVER_URL', 'CC_WS_ALLOWED_ORIGINS', 'CC_STEPDOWN_EXIT']) delete env[k];
+      'MCP_API_KEY', 'CC_AUTO_SUPERVISOR', 'CC_ALLOW_NO_AUTH', 'SERVER_URL', 'CC_WS_ALLOWED_ORIGINS', 'CC_STEPDOWN_EXIT',
+      'CLEANUP_DAYS', 'CC_MAX_IMPORT_MB', 'CC_RETRY_MS', 'CC_RETRY_MAX_ATTEMPTS', 'CC_DRAIN_MS']) delete env[k];
+    for (const k of Object.keys(env)) if (k.startsWith('CC_RL_')) delete env[k];   // operator rate-limit tuning would perturb the write tests
     return {
       ...env,
       ...this.extraEnv,
@@ -198,8 +200,9 @@ export class Fleet {
   startNode(i) {
     // Restarting a node whose supervisor is still alive would FORGET that supervisor (nodes[i] is
     // overwritten) — it then outlives down(), respawning its server forever. Seen on POSIX when a
-    // test restarted the node it wrongly assumed had been the killed leader.
-    if (pidAlive(this.nodes[i]?.pid)) throw new Error(`node${i} is still running (pid ${this.nodes[i].pid}) — kill it before starting it again`);
+    // test restarted the node it wrongly assumed had been the killed leader. (cmdline, not the pid
+    // alone: a recycled pid must not read as "still running".)
+    if (this.#isOurSupervisor(this.nodes[i]?.pid)) throw new Error(`node${i} is still running (pid ${this.nodes[i].pid}) — kill it before starting it again`);
     const env = this.#prepareNode(i);
     const logFd = openSync(this.logPath(i), 'a');
     const child = spawn(process.execPath, [join(this.srcRoot(i), 'src', 'cc-bus.mjs'), 'start'], {
@@ -213,6 +216,8 @@ export class Fleet {
     this.#save();
     return node;
   }
+
+  #isOurSupervisor(pid) { return pidAlive(pid) && /cc-bus\.mjs"?\s+start/.test(procCmdline(pid)); }
 
   // UNCLEAN (default) or clean death of ONE node's supervisor tree.
   killNode(i, { clean = false } = {}) { killTree(this.nodes[i]?.pid, { clean }); }
@@ -374,14 +379,16 @@ export class Fleet {
   // recorded pid or a port number alone — a kept slot dir outlives a reboot (pids are recycled)
   // and a port can be held by a stranger: a supervisor must still be a `cc-bus.mjs start`, a
   // port-holder must be a server.mjs that answers whoami as one of THIS fleet's hosts.
+  // → SURVIVORS: [] when the fleet is verifiably gone, else what is still alive / still held (or
+  // why we could not look). Refusing to kill an unidentified process is the right failure
+  // direction, but it must be LOUD — callers assert the list is empty.
   async down() {
     const pids = new Set([...this.spawned, ...this.nodes.filter(Boolean).map((n) => n.pid)]);
-    for (const pid of pids) {
-      if (/cc-bus\.mjs"?\s+start/.test(procCmdline(pid))) killTree(pid, { clean: false });
-    }
+    for (const pid of pids) if (this.#isOurSupervisor(pid)) killTree(pid, { clean: false });
     const hosts = new Set(Array.from({ length: this.size }, (_, i) => this.hostOf(i).toLowerCase()));
+    const survivors = [];
     for (let i = 0; i < this.size; i++) {
-      let ls = []; try { ls = listeners(this.port(i)); } catch {}
+      let ls = []; try { ls = listeners(this.port(i)); } catch (e) { survivors.push(`could not probe :${this.port(i)} (${e.message})`); }
       if (!ls.length) continue;
       const w = await this.whoami(i);
       for (const l of ls) {
@@ -389,17 +396,21 @@ export class Fleet {
       }
     }
     await this.waitFor(() => { try { for (let i = 0; i < this.size; i++) if (listeners(this.port(i)).length) return null; return true; } catch { return true; } }, 10000);
+    for (const pid of pids) if (pidAlive(pid) && /cc-bus\.mjs/.test(procCmdline(pid))) survivors.push(`supervisor pid ${pid} still alive`);
+    for (let i = 0; i < this.size; i++) { try { for (const l of listeners(this.port(i))) survivors.push(`:${this.port(i)} still held by pid ${l.pid}`); } catch {} }
     this.#save();
+    return survivors;
   }
 
-  async destroy() {   // down + remove the slot dir (tests). Windows releases handles lazily → retry.
-    await this.down();
-    for (let k = 0; k < 20; k++) {
+  // down + remove the slot dir (tests) → the same SURVIVORS list, plus the dir if it would not go.
+  async destroy() {
+    const survivors = await this.down();
+    for (let k = 0; k < 20 && existsSync(this.dir); k++) {   // Windows releases handles lazily → retry
       try { rmSync(this.dir, { recursive: true, force: true }); } catch {}
-      if (!existsSync(this.dir)) return true;
-      await sleep(250);
+      if (existsSync(this.dir)) await sleep(250);
     }
-    return false;
+    if (existsSync(this.dir)) survivors.push(`could not remove ${this.dir}`);
+    return survivors;
   }
 
   #save() {
