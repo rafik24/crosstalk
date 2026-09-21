@@ -185,6 +185,8 @@ try {
   ok(await until(() => existsSync(beacon) && connects() > c3, 15000), 'third bridge is attached (push connected) and beating its beacon');
   await send('dm-qwen-lane-bbbbbbbb', 'hello-H');
   ok(await until(() => got('hello-H').length === 1, 3000) && got('hello-H')[0].auth === 'Bearer serve-secret', 'QWEN_SERVER_TOKEN reaches the daemon as a bearer');
+  if (process.platform === 'win32') console.log('  ⏭  L: the wedged-bridge (#27 stale-replace) case needs SIGSTOP — skipped on win32');
+  else {
   process.kill(pid3, 'SIGSTOP');                                   // wedge it: alive pid, beacon goes stale
   const past = new Date(Date.now() - 300000); utimesSync(beacon, past, past); utimesSync(pidFile, past, past);
   const e4 = spawnSync(process.execPath, [BRIDGE, 'ensure', ID, '--session', SID], { env: { ...envTok, CC_REPLACE_WAIT_MS: '1500' }, encoding: 'utf8', timeout: 20000 });
@@ -197,6 +199,7 @@ try {
   await send('dm-qwen-lane-bbbbbbbb', 'hello-L');
   await sleep(1500);
   ok(got('hello-L').length === 1, 'a DM after the replace is delivered exactly once (no double bridge)');
+  }
   spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID], { env, encoding: 'utf8' });
 } catch (e) { failed = true; console.error('❌', e.message); }
 finally {
