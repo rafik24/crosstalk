@@ -101,11 +101,14 @@ node "<plugin>/src/cc-enrol.mjs" --auto-supervisor     # prompts: Estate passwor
 ```
 
 It derives the two estate secrets from the password (scrypt, fixed public salts — every box that
-knows the password derives the same `CC_TOKEN` / `CC_ADMIN_KEY`), **verifies them against the
+knows the password derives the same `CC_TOKEN` / `CC_ADMIN_KEY`; scrypt N=2¹⁷ — **use a passphrase of
+four or more random words, min 16 chars**: it is the only secret), **verifies them against the
 live bus** (a leader must *prove* it holds that token — see Security), and only then writes
 `~/.claude/.crosstalk` (mode 600). A wrong password writes nothing. The password itself is never
 stored. An estate that predates 3.3.5 sets its password once with `cc-enrol --set-password` on any
-enrolled box, then re-enrols the others by password (`--token <raw>` remains for the old way).
+enrolled box, then re-enrols the others with `cc-enrol --re-enrol` — the estate is split until they
+all have (`--token <raw>` remains for the old way, ≥32 chars). Git Bash users: run it from Windows
+Terminal/PowerShell or via `winpty` — mintty hides the TTY from node and the hidden prompt refuses.
 
 Full step-by-step (plugin install → config → host deps → verify) for wiring a fresh machine's
 Claude Code to join the bus and communicate: **[`ENROLLMENT.md`](./ENROLLMENT.md)**. The `crosstalk`
@@ -316,11 +319,20 @@ below raises the floor; it does not make the bus safe to expose to the open inte
 - **Authenticated discovery (3.3.5).** `/cc/whoami` and the LAN beacon are public, and discovery
   follows the highest advertised epoch — so before 3.3.5 *any* host answering `{epoch: 1e15}` was
   adopted as leader and then received every client's bearer token. Now a client sends a fresh
-  nonce and only trusts a responder whose `proof` is `HMAC-SHA256(CC_TOKEN, nonce|host|epoch)`;
+  nonce and only trusts a responder whose `proof` is `HMAC-SHA256(CC_TOKEN, nonce|host|epoch|watermark|
+  <the server's own socket address:port>)` — checked against the address the client actually reached,
+  so a LAN relay that forwards the challenge to the real leader fails at its own address;
   beacon announces carry `ts` + `HMAC(CC_TOKEN, host|epoch|port|ts)` and are dropped when unsigned
-  or older than 60 s. Nothing derived from the token ever leaves the client. Unproven responders
+  or older than 60 s (a stale one is logged once with the measured skew). Nothing derived from the
+  token ever leaves the *client*; the leader does put HMACs keyed by the token on the wire (every
+  beacon, every answered challenge), so a LAN sniffer can guess the secret OFFLINE — use a real
+  passphrase (see Enrolling), never a short raw token. Unproven responders
   are IGNORED (logged once per base); `CC_DISCOVERY_PROOF=legacy` accepts them with a warning —
-  for the single sitting in which a pre-3.3.5 leader still serves, then removed. `src/cc-proof.mjs`.
+  for the single sitting in which a pre-3.3.5 leader still serves, then removed. A supervisor that
+  saw an unproven responder at an epoch ≥ its own will NOT promote (it waits and says why), so a
+  box upgraded before the leader cannot split or steal the estate. **Upgrade the LEADER box to
+  3.3.5 first**, then the others. Residual: an active adversary who can *sniff* the LAN and guess a
+  weak password offline. `src/cc-proof.mjs`.
 - **Loopback by default.** The server binds `127.0.0.1` unless you set `CC_BIND` (e.g. your
   tailnet IP, or `0.0.0.0`). A node that only serves itself needs nothing; a node that **hosts
   for the estate must set `CC_BIND`** — and, because of the next point, a token with it.

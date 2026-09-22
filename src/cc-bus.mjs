@@ -28,9 +28,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
 import {
-  loadConfig, resolveFull, whoami, cacheLeader, readCache, readTrustedCache, outranks, DEFAULT_PORT,
+  loadConfig, resolveFull, whoami, cacheLeader, readCache, readTrustedCache, outranks, highestUnprovenEpoch, DEFAULT_PORT,
 } from './cc-discover.mjs';
 import { startBeacon } from './cc-beacon.mjs';
+import { whoamiProof } from './cc-proof.mjs';
 import { revString, pkgVersion } from './cc-rev.mjs';
 import { canonicalShort } from './cc-render.mjs';
 import { dataDir } from './cc-paths.mjs';
@@ -265,7 +266,7 @@ export function adoptReplicaIfFresher() {
 async function registerSupervisor(id, role, epoch, token, port) {
   let base = null;
   if (role === 'leader') base = `http://127.0.0.1:${port}`;   // I am the server → register to myself
-  else { const c = readTrustedCache(); base = c?.base || null; }   // client → the discovered leader (never a cache entry CC_DISCOVERY=peers would not trust: this POST carries the token)
+  else { const c = readTrustedCache(); base = c?.proven === true ? c.base : null; }   // client → the discovered leader, and ONLY one that PROVED itself: this POST carries the token
   if (!base) return;
   try {
     await fetch(base + '/api/register', {
@@ -313,6 +314,17 @@ async function cmdStart() {
   heartbeatIv.unref?.();
 
   async function becomeLeader() {
+    // Rollout guard (issue 55): strict discovery IGNORES a leader that cannot prove the token —
+    // during the 3.3.5 rollout that is the pre-3.3.5 leader still serving, and during a
+    // password change it is every box not yet re-enrolled. Promoting beside it would split the
+    // estate or steal its term. If such a responder was seen at an epoch ≥ ours in the last
+    // scan: do NOT promote; wait, say why, scan again.
+    const u = highestUnprovenEpoch();
+    if (u && u.epoch >= readEpoch()) {
+      log(`⚠️  NOT promoting: ${u.base} answers at epoch ${u.epoch} but cannot prove the estate token (a pre-3.3.5 leader, or a different token). Upgrade / re-enrol that box, or set CC_DISCOVERY_PROOF=legacy for this sitting. Retrying in 15s.`);
+      setTimeout(electAndRun, 15000);
+      return;
+    }
     // Swap in the replicated snapshot now, before any server opens the DB (#35): promotion is
     // the one safe moment for the replica → messages.db rename.
     const adoption = adoptReplicaIfFresher();
@@ -654,7 +666,9 @@ async function cmdHandover(args) {
   if (!live || live.pid !== oldPid || !needsVersionHandover(live)) { log(`handover: nothing to do for pid ${oldPid}`); return; }
   const cfg = loadConfig();
   const loop = `http://127.0.0.1:${cfg.port}`;
-  const before = await whoami(loop, 1500);
+  // Own box, loopback: a pre-3.3.5 server here cannot prove itself, and it is exactly the one we
+  // are replacing — probe without the token (plain answer) so the drain still runs.
+  const before = await whoami(loop, 1500, '');
   let drained = false;
   if (before && canonicalShort(String(before.host || '')) === HOST) {
     log(`handover: asking the local leader (epoch ${before.epoch}) to DRAIN and step down`);
@@ -768,9 +782,12 @@ async function cmdReceive(args) {
   log(`STANDBY on :${port} (epoch ${standbyEpoch}) — awaiting /cc/import. Ctrl-C to cancel.`);
 
   const srv = createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/cc/whoami') {
+    if (req.method === 'GET' && req.url.split('?')[0] === '/cc/whoami') {
+      // A standby answers the discovery challenge too (issue 55) — `migrate` probes it strictly.
+      const n = new URL(req.url, 'http://x').searchParams.get('nonce');
+      const proof = n && /^[0-9a-f]{16,64}$/.test(n) && token ? { proof: whoamiProof(token, n, HOST, standbyEpoch, 0, req.socket.localAddress, req.socket.localPort) } : {};
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ role: 'standby', host: HOST, epoch: standbyEpoch, port }));
+      res.end(JSON.stringify({ role: 'standby', host: HOST, epoch: standbyEpoch, port, ...proof }));
       return;
     }
     if (req.method === 'POST' && req.url === '/cc/import') {

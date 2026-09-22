@@ -280,7 +280,7 @@ export async function startServer(opts = {}) {
       watermark, rev: code.rev, dirty: code.dirty,
       version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
       ...(draining ? { draining: true } : {}),   // a drain stepdown is in progress (issue 43)
-      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch) } : {}),
+      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort) } : {}),
     });
   });
 

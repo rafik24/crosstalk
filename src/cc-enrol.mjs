@@ -7,15 +7,21 @@
 //   node cc-enrol.mjs --set-password  on an ALREADY-enrolled box: choose the estate password and
 //                                     rewrite this box's config with the keys it derives (the other
 //                                     boxes then re-enrol by password)
-//   node cc-enrol.mjs --token <tok>   the pre-3.3.5 way: write a raw token, no derivation
+//   node cc-enrol.mjs --re-enrol      this box is enrolled but the estate password CHANGED: prompt,
+//                                     verify, rewrite ONLY the two keys (CC_BIND/CC_PEERS/… kept)
+//   node cc-enrol.mjs --token <tok>   the pre-3.3.5 way: write a raw token, no derivation (≥32 chars)
 //   options: --auto-supervisor  (also set CC_AUTO_SUPERVISOR=1)   --no-verify  (write without
 //            finding a leader — for the FIRST box of a brand-new estate)   --config <path>
 //
 // The password is never stored. Both estate secrets are derived from it with scrypt and fixed,
 // public salts, so every box that knows the password derives the SAME CC_TOKEN / CC_ADMIN_KEY —
 // that is what makes "type the password on the new laptop" equivalent to copying the token file:
-//   CC_TOKEN     = scrypt(password, "crosstalk/token/v1", N=2^15) → 32 bytes hex
-//   CC_ADMIN_KEY = scrypt(password, "crosstalk/admin/v1", N=2^15) → 32 bytes hex
+//   CC_TOKEN     = scrypt(password, "crosstalk/token/v1", N=2^17, r=8, p=1) → 32 bytes hex
+//   CC_ADMIN_KEY = scrypt(password, "crosstalk/admin/v1", N=2^17, r=8, p=1) → 32 bytes hex
+// The KDF cost is part of the salt string's version: it can never be raised silently (that would
+// re-key every enrolled box) — a future v2 is a new enrolment. The password is the ONLY secret:
+// a sniffer on the LAN captures (nonce, HMAC) pairs and can guess offline at ~2 guesses/s/core
+// against this KDF, so it must be a real passphrase (four or more random words), not a word.
 // Before anything is written the derived token is VERIFIED: discovery must find a leader that
 // proves it holds that token (cc-proof). A wrong password therefore fails loudly and leaves the
 // box untouched — it never half-enrols with a key nobody else has.
@@ -33,8 +39,8 @@ const has = (n) => args.includes(n);
 
 export function deriveKeys(password) {
   const pw = String(password);
-  if (pw.length < 12) throw new Error('the estate password must be at least 12 characters');
-  const kdf = (salt) => scryptSync(pw, salt, 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }).toString('hex');
+  if (pw.length < 16) throw new Error('the estate password must be at least 16 characters — use a passphrase of four or more random words');
+  const kdf = (salt) => scryptSync(pw, salt, 32, { N: 2 ** 17, r: 8, p: 1, maxmem: 256 * 1024 * 1024 }).toString('hex');
   return { token: kdf('crosstalk/token/v1'), admin: kdf('crosstalk/admin/v1') };
 }
 
@@ -45,6 +51,7 @@ function askHidden(question) {
     if (process.env.CC_ENROL_PASSWORD_FOR_TESTS !== undefined) return resolve(process.env.CC_ENROL_PASSWORD_FOR_TESTS);
     if (!process.stdin.isTTY) return reject(new Error('cc-enrol needs an interactive terminal (run it yourself, not from a hook)'));
     const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    rl.on('SIGINT', () => { process.stdout.write('\n'); process.exit(130); });   // Ctrl-C at the prompt must exit, not hang
     const orig = rl._writeToOutput;
     process.stdout.write(question);
     rl._writeToOutput = () => {};   // echo nothing while the password is typed
@@ -75,19 +82,21 @@ async function verify(token) {
 async function main() {
   const path = opt('--config') || configPath();
   const setPw = has('--set-password');
+  const reEnrol = has('--re-enrol');
   const rawToken = opt('--token');
+  if (rawToken && rawToken.length < 32) { console.error('--token: a raw token this short falls to an offline guess from one sniffed beacon; use ≥32 random characters, or enrol by password'); process.exit(1); }
 
-  if (existsSync(path) && !setPw) {
-    console.error(`already enrolled: ${path} exists. To change the estate password run with --set-password; to re-enrol, remove the file first.`);
+  if (existsSync(path) && !setPw && !reEnrol) {
+    console.error(`already enrolled: ${path} exists. Password changed on the estate? run with --re-enrol (keeps CC_BIND/CC_PEERS/…). Setting a NEW estate password from this box: --set-password.`);
     process.exit(1);
   }
-  if (setPw && !existsSync(path)) { console.error('--set-password is for an ALREADY-enrolled box (it rewrites its keys); to enrol a new box just run cc-enrol'); process.exit(1); }
+  if ((setPw || reEnrol) && !existsSync(path)) { console.error(`${setPw ? '--set-password' : '--re-enrol'} is for an ALREADY-enrolled box (it rewrites its keys, keeping the other settings); to enrol a new box just run cc-enrol`); process.exit(1); }
 
   let token, admin;
   if (rawToken) {
     token = rawToken; admin = opt('--admin') || '';
   } else {
-    const pw = await askHidden(setPw ? 'Choose the estate password (min 12 chars): ' : 'Estate password: ');
+    const pw = await askHidden(setPw ? 'Choose the estate password (min 16 chars — a passphrase of four or more random words): ' : 'Estate password: ');
     if (setPw) { const again = await askHidden('Repeat it: '); if (again !== pw) { console.error('passwords differ — nothing written'); process.exit(1); } }
     ({ token, admin } = deriveKeys(pw));
     if (!setPw && !has('--no-verify')) {
@@ -99,7 +108,7 @@ async function main() {
   }
 
   const keep = [];
-  if (setPw) {   // preserve everything except the two keys
+  if (setPw || reEnrol) {   // preserve everything except the two keys
     for (const l of readFileSync(path, 'utf8').split(/\r?\n/)) if (l.trim() && !/^\s*(export\s+)?CC_(TOKEN|ADMIN_KEY)\s*=/.test(l)) keep.push(l);
   }
   const lines = [
@@ -110,7 +119,8 @@ async function main() {
     ...keep,
   ];
   writeConfig(path, lines);
-  console.log(`${setPw ? 'estate password set — this box now uses the derived keys' : 'enrolled'}: ${path}${setPw ? '\nre-enrol every OTHER box with `cc-enrol` and the new password (their old raw tokens no longer match); restart the bus supervisor here' : '\nstart a Claude session — the join hook does the rest'}`);
+  if (setPw) console.log(`estate password set — this box now uses the derived keys: ${path}\n⚠️  the estate is SPLIT until every other box runs \`cc-enrol --re-enrol\` with this password: their supervisors will not trust this box (different token) and will elect among themselves. Do it in one sitting; stop their supervisors first if you can. Then restart the supervisor here.`);
+  else console.log(`${reEnrol ? 're-enrolled with the new keys' : 'enrolled'}: ${path}\n${reEnrol ? 'restart the bus supervisor on this box' : 'start a Claude session — the join hook does the rest'}`);
 }
 
 import { pathToFileURL } from 'node:url';

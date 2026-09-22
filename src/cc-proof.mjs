@@ -6,8 +6,13 @@
 // every client's bearer token. Now a responder must PROVE it holds the estate secret:
 //
 //   whoami    the client sends a fresh nonce; the leader answers with
-//             proof = HMAC-SHA256(CC_TOKEN, "whoami|" + nonce + "|" + host + "|" + epoch)
-//             (the client never sends anything a forger could replay or learn from)
+//             proof = HMAC-SHA256(CC_TOKEN, "whoami|" + nonce + "|" + host + "|" + epoch + "|" +
+//                                 watermark + "|" + <the server's OWN socket address:port>)
+//             The client checks it against the address it actually reached — so a RELAY on the
+//             LAN that forwards the challenge to the real leader fails at the relay's address
+//             (the leader signed ITS address, not the relay's), and the unsigned election
+//             tiebreak (watermark) cannot be rewritten in flight either. The client never sends
+//             anything a forger could replay or learn from.
 //   beacon    every announce carries ts + HMAC(CC_TOKEN, "beacon|" + host + "|" + epoch +
 //             "|" + port + "|" + ts); a solicitor accepts it only with a valid proof and a
 //             fresh ts (replay window BEACON_FRESH_MS)
@@ -27,7 +32,9 @@ export function nonce() { return randomBytes(16).toString('hex'); }
 
 function hmac(token, text) { return createHmac('sha256', String(token)).update(text).digest('hex'); }
 
-export function whoamiProof(token, n, host, epoch) { return hmac(token, `whoami|${n}|${host}|${epoch}`); }
+// IPv4-mapped IPv6 ('::ffff:127.0.0.1') and bare forms must agree on both ends.
+export function normAddr(a) { const s = String(a || ''); return s.startsWith('::ffff:') ? s.slice(7) : s; }
+export function whoamiProof(token, n, host, epoch, watermark, addr, port) { return hmac(token, `whoami|${n}|${host}|${epoch}|${watermark ?? 0}|${normAddr(addr)}:${port}`); }
 export function beaconProof(token, host, epoch, port, ts) { return hmac(token, `beacon|${host}|${epoch}|${port}|${ts}`); }
 
 export function proofsMatch(a, b) {
@@ -40,10 +47,11 @@ export function proofMode() { return (process.env.CC_DISCOVERY_PROOF || '').toLo
 
 // Does a whoami answer prove itself? true = proven, false = wrong/missing proof, null = the caller
 // has no token so nothing can be checked (an unenrolled box, a bare probe).
-export function whoamiProven(token, n, j) {
+// reached = { address, port } — the peer this client's socket actually connected to.
+export function whoamiProven(token, n, j, reached) {
   if (!token) return null;
-  if (!j || typeof j.proof !== 'string') return false;
-  return proofsMatch(whoamiProof(token, n, j.host, j.epoch), j.proof);
+  if (!j || typeof j.proof !== 'string' || !reached) return false;
+  return proofsMatch(whoamiProof(token, n, j.host, j.epoch, j.watermark, reached.address, reached.port), j.proof);
 }
 
 export function beaconProven(token, m, now = Date.now()) {

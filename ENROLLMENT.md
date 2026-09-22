@@ -94,14 +94,17 @@ hook prints the command. Or run it directly:
 ```sh
 node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
 # Estate password: ▮          (hidden; asks whoever set the estate up)
-# verifying against the estate… ok — leader raf-ms-7e59 (epoch 108) proved it
+# verifying against the estate… ok — leader <host> (epoch N) proved it
 # enrolled: ~/.claude/.crosstalk
 ```
 
 The keys are derived from the password (never stored) and verified against a leader that proves
 it holds them, so a typo cannot half-enrol the box. First box of a brand-new estate (no leader
 yet): `cc-enrol --no-verify`. Switching an old raw-token estate to a password: on one enrolled box
-`cc-enrol --set-password`, restart its supervisor, then enrol the others by password.
+`cc-enrol --set-password`, restart its supervisor, then `cc-enrol --re-enrol` on every other box in the
+same sitting (until then the estate is split: old-token boxes will not trust the new leader). The
+password must be ≥16 chars — a passphrase of four or more random words. Windows: run the prompt from
+Windows Terminal / PowerShell (or `winpty node …`); mintty (Git Bash's default) hides the TTY.
 
 **The manual way** — this file is **git-ignored on purpose** — the token never goes into version
 control. (The legacy `~/.claude/.cross-claude-bus` is still read for back-compat if the new name

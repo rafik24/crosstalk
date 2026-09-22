@@ -15,6 +15,11 @@
 //   P4  cc-enrol: deriveKeys is deterministic + password-sensitive; a wrong password writes
 //       NOTHING (exit 2, verify fails) and the right one writes a 600 config with derived keys
 //       that a real leader accepts
+//   P5  a MITM RELAY that forwards the challenge to the real leader is REJECTED — the proof is
+//       bound to the server's own socket address, so it does not verify at the relay's address
+//       (reviewer B1; mutation-verified: unbind the proof and the relay wins)
+//   P6  a migrate STANDBY (`cc-bus receive`) answers the challenge and proves itself, so a 3.3.5
+//       `migrate` can still find it under strict discovery (reviewer B2)
 // ---------------------------------------------------------------------------
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -48,11 +53,18 @@ await new Promise((r) => forger.listen(FORGER, '127.0.0.1', r));
 try {
   console.log('P1 pure proofs');
   const n = nonce();
-  ok(whoamiProven(TOKEN, n, { host: 'h', epoch: 3, proof: whoamiProof(TOKEN, n, 'h', 3) }) === true, 'a whoami proof verifies');
-  ok(whoamiProven(TOKEN, n, { host: 'h', epoch: 4, proof: whoamiProof(TOKEN, n, 'h', 3) }) === false, '…and is bound to the epoch');
-  ok(whoamiProven('other', n, { host: 'h', epoch: 3, proof: whoamiProof(TOKEN, n, 'h', 3) }) === false, '…and to the token');
-  ok(whoamiProven(TOKEN, nonce(), { host: 'h', epoch: 3, proof: whoamiProof(TOKEN, n, 'h', 3) }) === false, '…and to the nonce (no replay)');
-  ok(whoamiProven('', n, { host: 'h', epoch: 3 }) === null, 'no token → nothing to check (null, not false)');
+  const R = { address: '10.0.0.1', port: 8787 };   // the address the client reached — signed in
+  const good = whoamiProof(TOKEN, n, 'h', 3, 5, R.address, R.port);
+  const mk = (over = {}) => ({ host: 'h', epoch: 3, watermark: 5, proof: good, ...over });
+  ok(whoamiProven(TOKEN, n, mk(), R) === true, 'a whoami proof verifies');
+  ok(whoamiProven(TOKEN, n, mk({ epoch: 4 }), R) === false, '…and is bound to the epoch');
+  ok(whoamiProven(TOKEN, n, mk({ watermark: 6 }), R) === false, '…and to the watermark (no in-flight rewrite of the tiebreak)');
+  ok(whoamiProven(TOKEN, n, mk(), { address: '10.0.0.2', port: 8787 }) === false, '…and to the address reached (a relay signs its OWN address, not the client\'s)');
+  ok(whoamiProven('other', n, mk(), R) === false, '…and to the token');
+  ok(whoamiProven(TOKEN, nonce(), mk(), R) === false, '…and to the nonce (no replay)');
+  ok(whoamiProven('', n, { host: 'h', epoch: 3 }, R) === null, 'no token → nothing to check (null, not false)');
+  ok(whoamiProven(TOKEN, n, mk(), null) === false, 'a proof with no known reached-address cannot verify');
+  ok(whoamiProof(TOKEN, n, 'h', 3, 5, '::ffff:10.0.0.1', 8787) === good, 'an IPv4-mapped IPv6 address matches its bare form');
   const ts = Date.now();
   ok(beaconProven(TOKEN, { host: 'h', epoch: 3, port: 8787, ts, proof: beaconProof(TOKEN, 'h', 3, 8787, ts) }) === true, 'a beacon proof verifies');
   ok(beaconProven(TOKEN, { host: 'h', epoch: 3, port: 8787, ts: ts - 120000, proof: beaconProof(TOKEN, 'h', 3, 8787, ts - 120000) }, ts) === false, 'a 2-minute-old beacon is stale (replay refused)');
@@ -80,6 +92,36 @@ try {
   delete process.env.CC_DISCOVERY_PROOF;
   rmSync(join(SCRATCH, 'cache'), { recursive: true, force: true });
 
+  console.log('P5 a MITM relay that forwards the challenge is defeated (issue 55, reviewer B1)');
+  {
+    // A relay: it forwards /cc/whoami?nonce to the REAL leader (so the proof is genuine) and even
+    // bumps the watermark to look more authoritative — but the leader signed ITS OWN address, and
+    // the client reaches the RELAY's address, so the proof does not verify at the relay.
+    const RELAY = PORT + 3;
+    const relay = http.createServer((rq, rs) => {
+      const rn = new URL(rq.url, 'http://x').searchParams.get('nonce');
+      http.get(`http://127.0.0.1:${PORT}/cc/whoami${rn ? `?nonce=${rn}` : ''}`, (up2) => {
+        let b = ''; up2.on('data', (d) => { b += d; }); up2.on('end', () => {
+          let j = {}; try { j = JSON.parse(b); } catch {}
+          j.watermark = 1e9;   // try to win the equal-epoch tiebreak in flight
+          rs.setHeader('content-type', 'application/json'); rs.end(JSON.stringify(j));
+        });
+      }).on('error', () => { rs.statusCode = 502; rs.end(); });
+    });
+    await new Promise((r) => relay.listen(RELAY, '127.0.0.1', r));
+    try {
+      const viaRelay = await whoami(`http://127.0.0.1:${RELAY}`, 800, TOKEN);
+      ok(viaRelay === null, `a client that reaches the relay REJECTS it — the proof is bound to the leader's address, not the relay's (${viaRelay ? `adopted ${viaRelay.base}` : 'null'})`);
+      // And discovery, offered both the direct leader and the relay, picks the leader.
+      process.env.CC_PEERS = `127.0.0.1:${PORT},127.0.0.1:${RELAY}`;
+      rmSync(join(SCRATCH, 'cache'), { recursive: true, force: true });
+      const picked = await resolveFull({ token: TOKEN, lanTimeoutMs: 100 });
+      ok(picked && picked.base === `http://127.0.0.1:${PORT}`, `resolveFull picks the direct leader, never the higher-watermark relay (${picked?.base})`);
+      process.env.CC_PEERS = `127.0.0.1:${FORGER}`;
+      rmSync(join(SCRATCH, 'cache'), { recursive: true, force: true });
+    } finally { await new Promise((r) => relay.close(r)); }
+  }
+
   console.log('P4 cc-enrol');
   const k1 = deriveKeys('correct horse battery staple'), k2 = deriveKeys('correct horse battery staple'), k3 = deriveKeys('correct horse battery stapl3');
   ok(k1.token === k2.token && k1.admin === k2.admin && k1.token !== k3.token && k1.token !== k1.admin && /^[0-9a-f]{64}$/.test(k1.token), 'deriveKeys: deterministic, password-sensitive, token ≠ admin, 32-byte hex');
@@ -105,6 +147,23 @@ try {
     const again = run(PW);
     ok(again.status === 1 && /already enrolled/.test(again.stderr), 'a second enrol refuses to overwrite');
   } finally { srv2.kill(); }
+
+  console.log('P6 a migrate STANDBY answers the discovery challenge (reviewer B2 — migrate was broken under strict)');
+  {
+    // `cc-bus receive` binds a standby that must prove itself, or a 3.3.5 `migrate` cannot find it.
+    const SPORT = PORT + 4;
+    const scfg = join(SCRATCH, 'standby-config');
+    (await import('node:fs')).writeFileSync(scfg, `CC_TOKEN=${TOKEN}\n`);
+    const standby = spawn(process.execPath, [join(__dirname, '..', 'src', 'cc-bus.mjs'), 'receive', '--port', String(SPORT)], {
+      env: { ...process.env, CC_BUS_CONFIG: scfg, CC_DATA_DIR: join(SCRATCH, 'standby-data'), CC_HOST: 'standbyhost', CC_PORT: String(SPORT) }, stdio: 'ignore',
+    });
+    try {
+      let w = null;
+      for (let i = 0; i < 60 && !w; i++) { w = await whoami(`http://127.0.0.1:${SPORT}`, 800, TOKEN); if (!w) await sleep(250); }
+      ok(w && w.role === 'standby' && w.proven === true, `the standby answers /cc/whoami?nonce and PROVES itself (${w ? `role=${w.role} proven=${w.proven}` : 'no answer — migrate would abort here'})`);
+      ok((await whoami(`http://127.0.0.1:${SPORT}`, 800, 'wrong')) === null, 'a wrong-token client ignores the standby too');
+    } finally { standby.kill(); }
+  }
 
   if (failed) console.error('❌ proof.test FAILED');
   else console.log('✅ proof.test: discovery authentication — whoami nonce/HMAC, signed fresh beacons, forger ignored (legacy control adopts it), cc-enrol verifies the password before writing');

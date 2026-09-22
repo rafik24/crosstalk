@@ -114,7 +114,7 @@ function probeJson(url, timeoutMs) {
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (c) => { body += c; if (body.length > 65536) finish(null); });   // a whoami is tiny
-        res.on('end', () => { try { finish(JSON.parse(body)); } catch { finish(null); } });
+        res.on('end', () => { try { const j = JSON.parse(body); if (j && typeof j === 'object') j.__reached = { address: res.socket?.remoteAddress, port: res.socket?.remotePort }; finish(j); } catch { finish(null); } });
         res.on('error', () => finish(null));
       });
       req.on('error', () => finish(null));
@@ -123,9 +123,21 @@ function probeJson(url, timeoutMs) {
   });
 }
 
+// What strict discovery IGNORED lately (base → { epoch, ts }). A supervisor about to promote
+// asks: did anyone answer without proof at an epoch ≥ mine? — during a rollout that is the
+// still-running pre-3.3.5 leader, and promoting beside it would split (or steal) the estate.
+const unprovenSeen = new Map();
+function noteUnproven(base, epoch) { unprovenSeen.set(base, { epoch: Number(epoch) || 0, ts: Date.now() }); }
+export function highestUnprovenEpoch(withinMs = 30000) {
+  let best = null;
+  for (const [b, v] of unprovenSeen) { if (Date.now() - v.ts > withinMs) { unprovenSeen.delete(b); continue; } if (best === null || v.epoch > best.epoch) best = { base: b, epoch: v.epoch }; }
+  return best;
+}
+
 // Unproven responders are reported once per base per process (a chatty warning would drown
 // the logs — a forger answers every scan).
 const warnedUnproven = new Set();
+const warnedBeacon = new Set();
 function warnUnproven(base, j) {
   if (warnedUnproven.has(base)) return;
   warnedUnproven.add(base);
@@ -143,8 +155,8 @@ export async function whoami(base, timeoutMs = 1500, token = undefined) {
     if (typeof j.epoch !== 'number') return null;
     // Discovery authentication (issue 55): an enrolled client only trusts a responder that
     // proves it holds the estate token. Legacy mode (rollout window) accepts with a warning.
-    const proven = whoamiProven(tok, n, j);
-    if (proven === false) { warnUnproven(base, j); if (proofMode() !== 'legacy') return null; }
+    const proven = whoamiProven(tok, n, j, j.__reached);
+    if (proven === false) { warnUnproven(base, j); noteUnproven(base, j.epoch); if (proofMode() !== 'legacy') return null; }
     // Canonical base = the address WE dialed (guaranteed reachable from here), not what the
     // server guesses. host/epoch/rev/watermark come from the server. watermark is the highest
     // message id served — a freshness proxy the election uses to break an equal-epoch tie.
@@ -219,7 +231,12 @@ function lanSolicit(beaconPort, timeoutMs = 400, token = '') {
         if (m && m.t === 'announce' && typeof m.epoch === 'number') {
           // Issue 55: an announce must carry a fresh, valid proof (or the caller runs legacy).
           const proven = beaconProven(token, m);
-          if (proven === false && proofMode() !== 'legacy') return;
+          if (proven === false) {
+            // Say WHY, once per source: a clock >60s off silently killed LAN discovery otherwise.
+            const key = rinfo.address + ':' + m.port;
+            if (!warnedBeacon.has(key)) { warnedBeacon.add(key); const skew = typeof m.ts === 'number' ? Math.round(Math.abs(Date.now() - m.ts) / 1000) : null; console.error(`[discovery] ⚠️  ${proofMode() === 'legacy' ? 'ACCEPTING' : 'IGNORING'} beacon from ${rinfo.address} (host ${m.host}, epoch ${m.epoch}): ${typeof m.proof !== 'string' ? 'unsigned (pre-3.3.5 leader?)' : skew !== null && skew > 60 ? `stale by ${skew}s — check the clocks on both boxes` : 'bad proof (different estate token)'}`); }
+            if (proofMode() !== 'legacy') return;
+          }
           found.push({ ip: rinfo.address, port: m.port || DEFAULT_PORT, host: m.host, epoch: m.epoch });
         }
       } catch {}
