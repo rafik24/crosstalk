@@ -25,6 +25,8 @@
 // HMAC itself, which reveals nothing about the key.
 // ---------------------------------------------------------------------------
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { configPath } from './cc-paths.mjs';
 
 export const BEACON_FRESH_MS = 60000;
 
@@ -32,8 +34,16 @@ export function nonce() { return randomBytes(16).toString('hex'); }
 
 function hmac(token, text) { return createHmac('sha256', String(token)).update(text).digest('hex'); }
 
-// IPv4-mapped IPv6 ('::ffff:127.0.0.1') and bare forms must agree on both ends.
-export function normAddr(a) { const s = String(a || ''); return s.startsWith('::ffff:') ? s.slice(7) : s; }
+// Normalise an address so both ends agree: strip an IPv4-mapped-IPv6 prefix ('::ffff:127.0.0.1'),
+// drop a v6 zone id ('fe80::1%eth0' → 'fe80::1'), and lowercase (v6 hex casing differs per stack).
+// The binding is fail-CLOSED — a form the two sides render differently would reject a REAL leader —
+// so this covers the reachable cases; compressed-vs-expanded v6 is not handled (v4 estate today).
+export function normAddr(a) {
+  let s = String(a || '').toLowerCase();
+  if (s.startsWith('::ffff:')) s = s.slice(7);
+  const z = s.indexOf('%'); if (z >= 0) s = s.slice(0, z);
+  return s;
+}
 export function whoamiProof(token, n, host, epoch, watermark, addr, port) { return hmac(token, `whoami|${n}|${host}|${epoch}|${watermark ?? 0}|${normAddr(addr)}:${port}`); }
 export function beaconProof(token, host, epoch, port, ts) { return hmac(token, `beacon|${host}|${epoch}|${port}|${ts}`); }
 
@@ -42,8 +52,25 @@ export function proofsMatch(a, b) {
   return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
 }
 
+// The rollout escape must be reachable by the HOOK-STARTED supervisor, which gets its settings
+// from the config FILE, not the operator's env: cc-join sources ~/.claude/.crosstalk without
+// `export`, and cc-enrol writes non-exported lines, so `node cc-bus ensure` does not inherit them
+// — every other CC_* works only because cc-bus reads the file directly. So proofMode must too, or
+// the documented `CC_DISCOVERY_PROOF=legacy` rollback is inert on the auto-supervisor (reviewer
+// B, RC2). Env wins over the file; a tiny inline read (not loadConfig) avoids a cc-discover cycle.
+function configDiscoveryProof() {
+  try {
+    for (const l of readFileSync(configPath(), 'utf8').split(/\r?\n/)) {
+      const m = l.match(/^\s*(?:export\s+)?CC_DISCOVERY_PROOF\s*=\s*(.*?)\s*$/);
+      if (m) return m[1].replace(/^["']|["']$/g, '');
+    }
+  } catch {}
+  return '';
+}
 // 'strict' (default) | 'legacy' (rollout window only)
-export function proofMode() { return (process.env.CC_DISCOVERY_PROOF || '').toLowerCase() === 'legacy' ? 'legacy' : 'strict'; }
+export function proofMode() {
+  return (process.env.CC_DISCOVERY_PROOF || configDiscoveryProof() || '').toLowerCase() === 'legacy' ? 'legacy' : 'strict';
+}
 
 // Does a whoami answer prove itself? true = proven, false = wrong/missing proof, null = the caller
 // has no token so nothing can be checked (an unenrolled box, a bare probe).

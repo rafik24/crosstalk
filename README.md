@@ -328,11 +328,17 @@ below raises the floor; it does not make the bus safe to expose to the open inte
   beacon, every answered challenge), so a LAN sniffer can guess the secret OFFLINE — use a real
   passphrase (see Enrolling), never a short raw token. Unproven responders
   are IGNORED (logged once per base); `CC_DISCOVERY_PROOF=legacy` accepts them with a warning —
-  for the single sitting in which a pre-3.3.5 leader still serves, then removed. A supervisor that
-  saw an unproven responder at an epoch ≥ its own will NOT promote (it waits and says why), so a
-  box upgraded before the leader cannot split or steal the estate. **Upgrade the LEADER box to
-  3.3.5 first**, then the others. Residual: an active adversary who can *sniff* the LAN and guess a
-  weak password offline. `src/cc-proof.mjs`.
+  for the single sitting in which a pre-3.3.5 leader still serves, then removed. **Set it in
+  `~/.claude/.crosstalk`, not just the shell**, so the hook-started auto-supervisor (which reads
+  the config file, not your env) honours it too. A supervisor that saw an unproven responder at an
+  epoch ≥ its own will HOLD OFF promoting (it waits and says why), so a box upgraded before the
+  leader cannot split or steal the estate — but only for ~90 s (`CC_PROMOTE_GUARD_MS`), after which
+  it proceeds loudly, so a forger (or a stray old-token box) cannot freeze failover permanently.
+  **Upgrade the LEADER box to 3.3.5 first**, then the others; a planned rollout with `legacy` set
+  never trips the guard at all. Residual: an active adversary who can *sniff* the LAN and guess a
+  weak password offline; and, on a **tailnet** estate, a stray/old-token responder can stall a
+  failover for that ~90 s window (check `cc-bus.log` for the "NOT promoting" line before assuming a
+  dead bus). `src/cc-proof.mjs`.
 - **Loopback by default.** The server binds `127.0.0.1` unless you set `CC_BIND` (e.g. your
   tailnet IP, or `0.0.0.0`). A node that only serves itself needs nothing; a node that **hosts
   for the estate must set `CC_BIND`** — and, because of the next point, a token with it.

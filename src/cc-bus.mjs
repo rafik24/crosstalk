@@ -74,6 +74,7 @@ const CONFIRM_RESCANS = 2, CONFIRM_GAP_MS = 2000;   // a missed leader is re-sca
 const HANDOVER_WAIT_MS = 26000;     // version handover: how long to wait for a draining old leader to leave
                                     // (> the server's CC_DRAIN_MS default of 20s) before killing its supervisor
 const STEPDOWN_HOLDOFF_MS = CLIENT_TICK_MAX_MS + 10000;   // an ex-leader may JOIN but not ELECT for this long
+const GUARD_MAX_MS = Math.max(15000, parseInt(process.env.CC_PROMOTE_GUARD_MS) || 90000);   // cap the "unproven responder present, hold off promoting" wait (issue 55) so a forger can't freeze failover
 const DRAIN_FOLLOW_MAX_MS = 30000;  // > the server's drain deadline (20s): never follow a drain forever
 
 // Is `pid` a live process? signal 0 tests existence cross-platform: it throws ESRCH when the
@@ -296,6 +297,7 @@ async function cmdStart() {
   let role = null;
   let monitorIv = null;
   let currentEpoch = 0;   // the term we currently believe in (for the heartbeat/registration)
+  let guardBlockedSince = 0;   // when the promote-guard (issue 55) first held off; 0 = not holding
 
   const STEPDOWN_MARKER = join(DATA_DIR, '.stepdown');
 
@@ -315,16 +317,28 @@ async function cmdStart() {
 
   async function becomeLeader() {
     // Rollout guard (issue 55): strict discovery IGNORES a leader that cannot prove the token —
-    // during the 3.3.5 rollout that is the pre-3.3.5 leader still serving, and during a
-    // password change it is every box not yet re-enrolled. Promoting beside it would split the
-    // estate or steal its term. If such a responder was seen at an epoch ≥ ours in the last
-    // scan: do NOT promote; wait, say why, scan again.
+    // during the 3.3.5 rollout that is the pre-3.3.5 leader still serving, and during a password
+    // change it is every box not yet re-enrolled. Promoting beside it would split the estate or
+    // steal its term. If such a responder was seen at an epoch ≥ ours: HOLD OFF, say why, scan
+    // again — but only for GUARD_MAX_MS. Unbounded, one unauthenticated responder (a forger, or a
+    // stray old-token box) would freeze this box's failover forever, and a brand-new estate's very
+    // first box (readEpoch()===0, so ANY responder is epoch≥ours) could never bootstrap. After the
+    // bound we proceed loudly: a forger cannot hold us hostage, and a genuine mis-ordered upgrade
+    // (which the docs tell you to avoid — upgrade the LEADER box first) degrades to a brief,
+    // logged split instead of a permanent outage. The real fix for a planned rollout is
+    // CC_DISCOVERY_PROOF=legacy in the config for the sitting, which never trips this at all.
     const u = highestUnprovenEpoch();
     if (u && u.epoch >= readEpoch()) {
-      log(`⚠️  NOT promoting: ${u.base} answers at epoch ${u.epoch} but cannot prove the estate token (a pre-3.3.5 leader, or a different token). Upgrade / re-enrol that box, or set CC_DISCOVERY_PROOF=legacy for this sitting. Retrying in 15s.`);
-      setTimeout(electAndRun, 15000);
-      return;
+      if (!guardBlockedSince) guardBlockedSince = Date.now();
+      const waited = Date.now() - guardBlockedSince;
+      if (waited < GUARD_MAX_MS) {
+        log(`⚠️  NOT promoting (${Math.round(waited / 1000)}s so far): ${u.base} answers at epoch ${u.epoch} but cannot prove the estate token (a pre-3.3.5 leader, a different token, or a forger). Upgrade the LEADER box first / re-enrol that box, or set CC_DISCOVERY_PROOF=legacy in ~/.claude/.crosstalk for this sitting. Retrying in 15s; giving up after ${Math.round(GUARD_MAX_MS / 1000)}s.`);
+        setTimeout(electAndRun, 15000);
+        return;
+      }
+      log(`⚠️  proceeding after ${Math.round(waited / 1000)}s despite ${u.base} (unprovable, epoch ${u.epoch}) — it is most likely a forger or a stray old-token box. If it was a REAL pre-3.3.5 leader you may briefly split: stop it, upgrade the leader box first, and use CC_DISCOVERY_PROOF=legacy for the rollout sitting.`);
     }
+    guardBlockedSince = 0;
     // Swap in the replicated snapshot now, before any server opens the DB (#35): promotion is
     // the one safe moment for the replica → messages.db rename.
     const adoption = adoptReplicaIfFresher();

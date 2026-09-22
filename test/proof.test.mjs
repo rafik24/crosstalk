@@ -165,6 +165,24 @@ try {
     } finally { standby.kill(); }
   }
 
+  console.log('P7 the legacy escape is reachable from the CONFIG FILE (reviewer B — the hook-started supervisor has no operator env)');
+  {
+    const { proofMode } = await import('../src/cc-proof.mjs');
+    const cfgFile = join(SCRATCH, 'legacy-config');
+    const saved = process.env.CC_BUS_CONFIG, savedEnv = process.env.CC_DISCOVERY_PROOF;
+    delete process.env.CC_DISCOVERY_PROOF;
+    (await import('node:fs')).writeFileSync(cfgFile, 'CC_TOKEN=x\nCC_DISCOVERY_PROOF=legacy\n');
+    process.env.CC_BUS_CONFIG = cfgFile;
+    ok(proofMode() === 'legacy', 'CC_DISCOVERY_PROOF=legacy in the config file is honoured (not just the env)');
+    process.env.CC_DISCOVERY_PROOF = 'strict';
+    ok(proofMode() === 'strict', 'the env still overrides the config file');
+    delete process.env.CC_DISCOVERY_PROOF;
+    (await import('node:fs')).writeFileSync(cfgFile, 'CC_TOKEN=x\n');
+    ok(proofMode() === 'strict', 'no setting → strict');
+    if (saved === undefined) delete process.env.CC_BUS_CONFIG; else process.env.CC_BUS_CONFIG = saved;
+    if (savedEnv !== undefined) process.env.CC_DISCOVERY_PROOF = savedEnv;
+  }
+
   if (failed) console.error('❌ proof.test FAILED');
   else console.log('✅ proof.test: discovery authentication — whoami nonce/HMAC, signed fresh beacons, forger ignored (legacy control adopts it), cc-enrol verifies the password before writing');
 } catch (e) {

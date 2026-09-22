@@ -156,7 +156,10 @@ try {
     const stranger = http.createServer((req, res) => {
       const n = new URL(req.url, 'http://x').searchParams.get('nonce');
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ role: 'leader', host: 'stranger', epoch: 99, watermark: 0, ...(n ? { proof: whoamiProof('tt', n, 'stranger', 99) } : {}) }));
+      // Sign the 7-arg (address-bound) proof so a token-holding client (CC_TOKEN='tt' is set above)
+      // ADOPTS it in auto mode — otherwise the control arm's `auto.host === 'stranger'` is false,
+      // the else branch never runs, and the peers-confinement assertion is silently skipped.
+      res.end(JSON.stringify({ role: 'leader', host: 'stranger', epoch: 99, watermark: 0, ...(n ? { proof: whoamiProof('tt', n, 'stranger', 99, 0, req.socket.localAddress, req.socket.localPort) } : {}) }));
     });
     await new Promise((r) => stranger.listen(8794, '0.0.0.0', r));
     const stopBeacon = startBeacon({ host: 'stranger', epoch: 99, port: 8794, beaconPort: 8899, announceMs: 60000, token: 'tt' });
