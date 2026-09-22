@@ -120,7 +120,9 @@ try {
   ok(!!pi.commands.bus, 'T: /bus command registered');
 
   await pi.fire('session_start', { reason: 'startup' }, ctx);
-  ok(await until(() => ext.active, 5000), 'session_start: receiver started + active');
+  // 20s, not 5: start() runs a FULL discovery scan first (tailscale exec ≤2.5s + LAN solicit + probes),
+  // which a loaded box or a shared CI runner stretches past 5s — seen RED once on Linux under load.
+  ok(await until(() => ext.active, 20000), 'session_start: receiver started + active');
   ok(ext.identity === ID, 'session_start: identity is the CC_INSTANCE id');
   ok(ctx.status.crosstalk === '● ' + ID, 'session_start: status line shows ● <id>');
 
@@ -175,7 +177,7 @@ try {
       const CFGID = 'testbox/pi-fromcfg';
       const extR = installCrosstalk(piR, { Type, env: { CC_INSTANCE: CFGID }, host: 'testbox', log: () => {} });  // NO pin, NO token
       await piR.fire('session_start', { reason: 'startup' }, ctxR);
-      ok(await until(() => extR.active, 5000), 'R: joins with token+base taken from the config file (no explicit token)');
+      ok(await until(() => extR.active, 20000), 'R: joins with token+base taken from the config file (no explicit token)');
       const rr = await piR.tools.bus_send.execute('r1', { channel: `dm-${shortIdOf(CFGID)}-x`, text: 'cfg token works', type: 'response' });
       ok(/id=\d+/.test(rr.content[0].text), 'R: bus_send authenticates with the config-file token (no "no CC_TOKEN")');
       await piR.fire('session_shutdown', { reason: 'quit' }, ctxR);

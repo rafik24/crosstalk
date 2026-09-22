@@ -18,7 +18,8 @@
 //
 // Exit 0 on success, 1 on failure (incl. a lost claim), 2 on bad usage.
 // ---------------------------------------------------------------------------
-import { resolveFast, loadConfig } from "./cc-discover.mjs";
+import { resolveFast, loadConfig, resolveFull } from "./cc-discover.mjs";
+import { throughDrain } from "./cc-retry.mjs";
 import { pkgVersion } from "./cc-rev.mjs";   // x-cc-version — the fleet version gate refuses a mismatch
 
 const WORK_STATES = ["queued", "claimed", "implementing", "in-review", "merged", "deployed", "blocked", "abandoned"];
@@ -64,11 +65,13 @@ if (hardPin) {
 }
 
 async function api(method, path, body) {
-  const r = await fetch(BASE + "/api" + path, {
+  // A leader mid-handover answers 503 draining: wait it out and re-send to whoever leads next
+  // (never when the caller hard-pinned a base — then the pin is the whole point).
+  const r = await throughDrain(() => fetch(BASE + "/api" + path, {
     method,
     headers: { Authorization: "Bearer " + TOKEN, "content-type": "application/json", "x-cc-version": pkgVersion() || "" },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }), async () => { BASE = (await resolveFull({ pin: opt("--base", process.env.CC_BASE) || cfg.pin, token: TOKEN }))?.base ?? BASE; }, { tries: hardPin ? 0 : undefined, log: (l) => console.error(l) });
   const text = await r.text();
   let json; try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
   return { status: r.status, ok: r.ok, json };

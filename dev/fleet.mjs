@@ -127,7 +127,7 @@ export class Fleet {
   //           (the version-handover scenarios run two package.json versions side by side).
   // dataDirOverrides / hostOverrides: deliberately collide nodes (the same-host #35 guard).
   constructor({ size = 2, slot = 0, dir = null, token = null, hostOverrides = {}, dataDirOverrides = {},
-    srcRoots = {}, replicateMs = 2000, extraEnv = {} } = {}) {
+    srcRoots = {}, replicateMs = 2000, extraEnv = {}, envOverrides = {} } = {}) {
     if (size < 1 || size > MAX_NODES) throw new Error(`fleet size must be 1..${MAX_NODES}`);
     if (!Number.isInteger(slot) || slot < 0 || slot > 100) throw new Error('fleet slot must be 0..100');
     this.size = size;
@@ -138,6 +138,7 @@ export class Fleet {
     this.dataDirOverrides = dataDirOverrides;
     this.srcRoots = srcRoots;
     this.extraEnv = extraEnv;
+    this.envOverrides = envOverrides;   // { i: { VAR: value } } — per-NODE env (e.g. a different CC_REPLICATE_MS per node)
     this.base = BASE_PORT + slot * PORTS_PER_SLOT;
     this.beaconPort = this.base + 16;
     // tmpdir, never the real home: a fleet must leave nothing behind in an operator's profile.
@@ -185,6 +186,8 @@ export class Fleet {
       CC_BEACON_PORT: String(this.beaconPort),
       CC_PEERS: peers.join(','),
       CC_REPLICATE_MS: String(this.replicateMs),
+      ...(this.envOverrides[i] || {}),
+      CC_BIND: '127.0.0.1',   // (again, last: a per-node override can never widen the bind either)
     };
   }
 

@@ -28,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
 import {
-  loadConfig, resolveFull, whoami, cacheLeader, readCache, outranks, DEFAULT_PORT,
+  loadConfig, resolveFull, whoami, cacheLeader, readCache, readTrustedCache, outranks, DEFAULT_PORT,
 } from './cc-discover.mjs';
 import { startBeacon } from './cc-beacon.mjs';
 import { revString, pkgVersion } from './cc-rev.mjs';
@@ -65,6 +65,15 @@ const HEARTBEAT_MS = 10000;        // supervisor rewrites its heartbeat this oft
 const SUPERVISOR_STALE_MS = 30000; // a heartbeat older than this (3 missed beats) ⇒ presumed dead
 const SPAWN_LOCK_STALE_MS = 15000; // an abandoned spawn lock older than this is cleared
 const SUPERVISOR_PREFIX = 'cc-bus-supervisor/';   // presence-id prefix for coverage visibility
+const CLIENT_TICK_MAX_MS = 15000;   // a client's failover-check tick at the default cadence
+const CLIENT_TICK_MIN_MS = 5000;    // …and its floor: a full discovery scan (tailnet exec + LAN solicit + probes)
+                                    // every second per node is a storm, and a 1-2s failure detector promotes
+                                    // on a stall (a busy box, a suspend/resume). The PULL has its own timer.
+const CONFIRM_RESCANS = 2, CONFIRM_GAP_MS = 2000;   // a missed leader is re-scanned this often before we elect
+const HANDOVER_WAIT_MS = 26000;     // version handover: how long to wait for a draining old leader to leave
+                                    // (> the server's CC_DRAIN_MS default of 20s) before killing its supervisor
+const STEPDOWN_HOLDOFF_MS = CLIENT_TICK_MAX_MS + 10000;   // an ex-leader may JOIN but not ELECT for this long
+const DRAIN_FOLLOW_MAX_MS = 30000;  // > the server's drain deadline (20s): never follow a drain forever
 
 // Is `pid` a live process? signal 0 tests existence cross-platform: it throws ESRCH when the
 // process is gone and EPERM when it exists but we can't signal it (still alive → true).
@@ -200,25 +209,36 @@ async function waitFor(base, predicate, timeoutMs = 20000, everyMs = 400) {
 // the leader's epoch so the failover-promote is authoritative (epoch+1 > the leader's). A
 // client runs no server, so DB_FILE is not open here; we clear stale WAL/SHM and swap the fresh
 // image in atomically. Best-effort: any failure returns false and never disturbs the client.
-async function replicateSnapshot(leader, token) {
+async function replicateSnapshot(leader, token) { return (await pullSnapshot(leader, token)).ok; }
+const PULL_TIMEOUT_MS = 60000;   // a stalled leader must not hold a pull open for ever
+// → { ok, draining }: `draining` = the leader answered with x-cc-draining (it is in a drain
+// stepdown — read-only and leaving as soon as a replica holds the final snapshot; issue 43).
+async function pullSnapshot(leader, token, stillWanted = () => true) {
+  const miss = { ok: false, draining: false };
   try {
     // Issue #35: NEVER replicate when the leader is this very host — the pull would target the
     // same DATA_DIR the live leader has open. The old guard matched only a loopback-resolved
     // base URL (defeated by CC_BIND=0.0.0.0, where discovery returns the LAN address) and a
     // case-sensitive host compare (defeated by OS-vs-config casing, issue #39). Canonical host
     // equality catches both. A same-host client still watches for failover; it just never pulls.
-    if (canonicalShort(String(leader.host || '')) === HOST) return false;
-    const r = await fetch(leader.base + '/cc/export', { headers: { Authorization: adminBearer(token) } });
-    if (!r.ok) return false;
+    if (canonicalShort(String(leader.host || '')) === HOST) return miss;
+    const r = await fetch(leader.base + '/cc/export', { headers: { Authorization: adminBearer(token) }, signal: AbortSignal.timeout(PULL_TIMEOUT_MS) });
+    if (!r.ok) return miss;
+    const draining = r.headers.get('x-cc-draining') === '1';
     const buf = Buffer.from(await r.arrayBuffer());
-    if (!buf.length) return false;
+    if (!buf.length) return miss;
+    // A pull can outlive the role that started it (a STALLED leader answers its export long after
+    // we gave up on it and promoted). Writing then would plant a replica newer than our live DB —
+    // adopted, -wal deleted, on the next re-elect — and drag the epoch file BACKWARDS, so the next
+    // promotion re-uses a term. Re-check right before touching the disk.
+    if (!stillWanted()) return miss;
     mkdirSync(DATA_DIR, { recursive: true });
     const tmp = REPLICA_FILE + '.tmp';
     writeFileSync(tmp, buf);
     renameSync(tmp, REPLICA_FILE);   // atomic on both POSIX and Windows; live DB untouched (#35)
-    if (typeof leader.epoch === 'number') writeEpoch(leader.epoch);
-    return true;
-  } catch { return false; }
+    if (typeof leader.epoch === 'number') writeEpoch(Math.max(readEpoch(), leader.epoch));   // the epoch file is MONOTONIC
+    return { ok: true, draining };
+  } catch { return miss; }
 }
 
 // Adopt the replicated snapshot as the working DB at PROMOTION time — the only moment we know no
@@ -245,7 +265,7 @@ export function adoptReplicaIfFresher() {
 async function registerSupervisor(id, role, epoch, token, port) {
   let base = null;
   if (role === 'leader') base = `http://127.0.0.1:${port}`;   // I am the server → register to myself
-  else { const c = readCache(); base = c?.base || null; }      // client → the discovered leader
+  else { const c = readTrustedCache(); base = c?.base || null; }   // client → the discovered leader (never a cache entry CC_DISCOVERY=peers would not trust: this POST carries the token)
   if (!base) return;
   try {
     await fetch(base + '/api/register', {
@@ -320,7 +340,8 @@ async function cmdStart() {
     role = 'leader';
     log(`no bus present → becoming LEADER at epoch ${epoch} (port ${port})`);
     child = spawnLeader(epoch, port, token);
-    stopBeacon = startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort });
+    // CC_DISCOVERY=peers: a confined bus neither scans nor ADVERTISES itself on the LAN.
+    stopBeacon = cfg.discovery === 'peers' ? null : startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort });
 
     child.on('exit', (code) => {
       if (stopBeacon) { stopBeacon(); stopBeacon = null; }
@@ -330,7 +351,7 @@ async function cmdStart() {
       // the old leader would re-take the term at an epoch TIE with the freshly-migrated host.
       const wasStepdown = steppingDown || existsSync(STEPDOWN_MARKER);
       try { if (existsSync(STEPDOWN_MARKER)) rmSync(STEPDOWN_MARKER); } catch {}
-      if (wasStepdown) { log('stepped down → switching to CLIENT'); steppingDown = false; role = null; runClient(); return; }
+      if (wasStepdown) { log('stepped down → switching to CLIENT'); steppingDown = false; role = null; runClient({ holdoffMs: STEPDOWN_HOLDOFF_MS }); return; }
       log(`server exited (code ${code}) → re-electing in 1s`);
       role = null;
       setTimeout(electAndRun, 1000);
@@ -374,37 +395,115 @@ async function cmdStart() {
     }, 5000);
   }
 
-  async function runClient() {
+  // Client cadence (issue 43). Failover detection and the replica pull used to share ONE fixed 15s
+  // interval, so CC_REPLICATE_MS below 15s was silently ignored while the log claimed it as the
+  // loss bound. Now they are two timers:
+  //   PULL      every CC_REPLICATE_MS (floor 1s) — cheap: it re-uses the leader the failover loop
+  //             last confirmed, no discovery scan. This IS the unclean-failover loss bound.
+  //   FAILOVER  every clamp(CC_REPLICATE_MS, 5s, 15s) — a full scan; a miss is CONFIRMED by two
+  //             more scans 2s apart before we call the leader gone (one stalled probe, a long
+  //             GC or a suspend/resume blip must not split the bus).
+  // At the default (30s) this is exactly the old behaviour: 15s checks, 30s pulls.
+  let clientGen = 0;   // every runClient() supersedes the previous loop (no two client loops, ever)
+  async function runClient({ holdoffMs = 0 } = {}) {
     role = 'client';
-    const REPLICATE_MS = parseInt(process.env.CC_REPLICATE_MS) || 30000;
-    log(`CLIENT mode — a bus is present; not starting a server. Watching for failover + replicating the DB every ${Math.round(REPLICATE_MS / 1000)}s.`);
-    let lastReplicate = 0;      // when we last ATTEMPTED a pull (throttle)
-    let lastReplicateOk = 0;    // when we last SUCCEEDED (snapshot recency)
+    const gen = ++clientGen;
+    const live = () => role === 'client' && gen === clientGen;
+    const REPLICATE_MS = Math.max(1000, parseInt(process.env.CC_REPLICATE_MS) || 30000);
+    const TICK_MS = Math.min(CLIENT_TICK_MAX_MS, Math.max(CLIENT_TICK_MIN_MS, REPLICATE_MS));
+    // A node that just STEPPED DOWN must not win the term straight back: for one tick (+ margin)
+    // it may join a new leader but not start an election, so the replicas get to promote first.
+    const holdoffUntil = holdoffMs ? Date.now() + holdoffMs : 0;
+    log(`CLIENT mode — a bus is present; not starting a server. Failover check every ${TICK_MS / 1000}s, DB pull every ${REPLICATE_MS / 1000}s (= the unclean-failover loss bound).`);
+    let leaderNow = null;       // the leader the failover loop last confirmed — what the pull loop targets
+    let lastReplicateOk = 0;    // when a pull last SUCCEEDED (snapshot recency, for the log)
+    let pulling = false, scanning = false;
+    let pullIv = null, scanIv = null;
+    const stop = () => { clearInterval(pullIv); clearInterval(scanIv); };
+
+    async function pull() {
+      if (pulling || !leaderNow) return;
+      pulling = true;
+      try {
+        const r = await pullSnapshot(leaderNow, token, live);
+        if (!live()) return;
+        if (r.ok) lastReplicateOk = Date.now();
+        if (r.draining) { stop(); followDrain(leaderNow); }
+      } finally { pulling = false; }
+    }
+
     // Immediate first snapshot so a just-joined client can already fail over safely.
-    { const l0 = await resolveFull({ token }); if (l0 && await replicateSnapshot(l0, token)) { lastReplicate = Date.now(); lastReplicateOk = Date.now(); } }
-    // Periodic failover check + replication.
-    const iv = setInterval(async () => {
-      if (role !== 'client') { clearInterval(iv); return; }
-      const leader = await resolveFull({ token });
-      if (!leader) {
-        clearInterval(iv);
-        // Finding 3: auto-failover now promotes on the most recent replicated snapshot, so
-        // loss is BOUNDED to the replication interval (not the unbounded stale-DB loss).
-        const age = lastReplicateOk ? `~${Math.round((Date.now() - lastReplicateOk) / 1000)}s old` : 'NONE pulled — local DB may be stale/empty';
-        log(`leader vanished → re-electing on the last replicated snapshot (${age}); Finding-3 loss bounded to the ${Math.round(REPLICATE_MS / 1000)}s replication interval.`);
-        electAndRun();
-        return;
-      }
-      cacheLeader(leader);
-      if (Date.now() - lastReplicate >= REPLICATE_MS) {
-        lastReplicate = Date.now();   // stamp before the await so ticks don't stack pulls
-        if (await replicateSnapshot(leader, token)) lastReplicateOk = Date.now();
-      }
-    }, 15000);
+    leaderNow = await resolveFull({ token });
+    if (!live()) return;
+    if (leaderNow) { cacheLeader(leaderNow); await pull(); if (!live()) return; }
+
+    pullIv = setInterval(() => { if (!live()) return stop(); pull().catch(() => {}); }, REPLICATE_MS);
+    scanIv = setInterval(async () => {
+      if (!live()) return stop();
+      if (scanning) return;       // a slow scan must not stack on the next tick
+      scanning = true;
+      try {
+        let leader = await resolveFull({ token });
+        // CONFIRM a miss twice, 2s apart, before calling the leader gone: it must stay unreachable
+        // for ~4s+ AFTER the first miss. A stalled probe, a long GC or a suspended-then-resumed box
+        // must not cost a lossy failover (the promoted node serves its last snapshot) or a split.
+        for (let k = 0; k < CONFIRM_RESCANS && !leader; k++) {
+          await new Promise((r) => setTimeout(r, CONFIRM_GAP_MS));
+          if (!live()) return;
+          leader = await resolveFull({ token });
+        }
+        if (!live()) return;
+        if (!leader) {
+          if (Date.now() < holdoffUntil) return;   // just stepped down: let a replica take the term
+          stop();
+          // Finding 3: auto-failover promotes on the most recent replicated snapshot, so loss is
+          // BOUNDED by the pull interval (not the unbounded stale-DB loss).
+          const age = lastReplicateOk ? `~${Math.round((Date.now() - lastReplicateOk) / 1000)}s old` : 'NONE pulled — local DB may be stale/empty';
+          log(`leader vanished (confirmed by ${CONFIRM_RESCANS} re-scans) → re-electing on the last replicated snapshot (${age}).`);
+          electAndRun();
+          return;
+        }
+        leaderNow = leader;
+        cacheLeader(leader);
+        // A DRAINING leader is read-only and leaves the moment a replica holds its final snapshot:
+        // pull NOW (whatever the pull timer says) and follow it closely instead of waiting a tick.
+        // At the default cadence THIS is what beats the server's 20s drain deadline.
+        if (leader.draining) { stop(); followDrain(leader); }
+      } finally { scanning = false; }
+    }, TICK_MS);
   }
 
+  // The leader told us it is leaving (drain stepdown). Keep pulling until it is gone — each pull
+  // taken while it is read-only is a complete copy, and the first such pull releases it — then
+  // elect at once rather than a tick later. "Gone" needs TWO consecutive misses: a draining leader
+  // is busy (every follower pulls a full VACUUM INTO image), and one slow whoami must not make us
+  // promote beside it. Bounded: a leader that never leaves hands us back to the ordinary loop.
+  async function followDrain(leader) {
+    const gen = clientGen;
+    const live = () => role === 'client' && gen === clientGen;
+    log(`leader ${leader.host} is DRAINING for a stepdown → pulling its final snapshot and standing by to take the term`);
+    const end = Date.now() + DRAIN_FOLLOW_MAX_MS;
+    let misses = 0;
+    while (live() && Date.now() < end) {
+      const w = await whoami(leader.base, 1500);
+      if (!live()) return;
+      misses = w ? 0 : misses + 1;
+      if (misses >= 2) { log('draining leader is gone → electing now'); return electAndRun(); }
+      if (w) await pullSnapshot(leader, token, live);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (live()) runClient();
+  }
+
+  // Started by the version-handover helper right after the old leader DRAINED: a remote replica is
+  // taking the term on the final snapshot at this very moment. Electing now would tie with it at
+  // the same epoch — and the loser's writes are dropped with no epoch change for receivers to
+  // notice. Behave like the ex-leader we replace: join, but do not elect, for the holdoff.
+  let startHoldoffMs = Math.max(0, parseInt(process.env.CC_START_HOLDOFF_MS) || 0);
   async function electAndRun() {
     const leader = await resolveFull({ token });   // any live bus, incl. this box's loopback
+    if (!leader && startHoldoffMs) { const h = startHoldoffMs; startHoldoffMs = 0; log(`started after a drained handover → holding off elections for ${Math.round(h / 1000)}s`); return runClient({ holdoffMs: h }); }
+    startHoldoffMs = 0;
     if (leader) {
       cacheLeader(leader);
       currentEpoch = leader.epoch ?? currentEpoch;
@@ -479,7 +578,7 @@ function ensureLogFd() {
   } catch { return 'ignore'; }
 }
 
-function cmdEnsure(afterHandover = false) {
+function cmdEnsure(afterHandover = false, startEnv = {}) {
   const live = supervisorLive();
   if (live && needsVersionHandover(live)) {
     if (afterHandover) {
@@ -489,21 +588,20 @@ function cmdEnsure(afterHandover = false) {
       return;
     }
     // Issue #37: a supervisor from a superseded plugin install keeps running old code (and, when
-    // it leads, version-gates the whole upgraded fleet out) until killed by hand. Hand over: ask
-    // a local leader to step down gracefully (its client peers promote on a fresh snapshot),
-    // kill the old supervisor, then fall through to start the current-version one.
-    log(`supervisor here runs ${live.version || 'an unversioned install'} but the plugin is ${pkgVersion()} → version handover (pid ${live.pid})`);
+    // it leads, version-gates the whole upgraded fleet out) until killed by hand. Hand over — in a
+    // DETACHED helper, because doing it properly takes longer than a SessionStart hook may block:
+    // the old leader is asked to DRAIN (issue 43), so whichever node takes the term — a replica on
+    // another box, or the new supervisor here on the same messages.db — has every acknowledged
+    // message. (Before: a plain stepdown + a 6s respawn gap, during which a remote replica's tick
+    // could promote it on a snapshot up to one pull interval old; the fuller local DB then joined
+    // as a client and its tail was lost.)
+    log(`supervisor here runs ${live.version || 'an unversioned install'} but the plugin is ${pkgVersion()} → version handover (pid ${live.pid}) — running in the background, see ${join(DATA_DIR, 'cc-bus.log')}`);
     try {
-      const cfg = loadConfig();
-      // Best-effort local-leader stepdown; fire-and-forget with a short deadline.
-      fetch(`http://127.0.0.1:${cfg.port}/cc/stepdown`, { method: 'POST', headers: { Authorization: adminBearer(cfg.token) }, signal: AbortSignal.timeout(2000) }).catch(() => {});
-    } catch {}
-    setTimeout(() => { try { process.kill(live.pid); } catch {} }, 2500);
-    setTimeout(() => { try { if (pidAlive(live.pid)) process.kill(live.pid, 'SIGKILL'); } catch {} }, 5000);
-    // The stale heartbeat would block the respawn below for up to SUPERVISOR_STALE_MS; drop it.
-    try { rmSync(SUPERVISOR_FILE); } catch {}
-    // Defer the respawn past the kill escalation so old and new never overlap on the port.
-    setTimeout(() => { try { cmdEnsure(true); } catch {} }, 6000);
+      const fd = ensureLogFd();
+      spawn(process.execPath, [fileURLToPath(import.meta.url), 'handover', String(live.pid)], {
+        detached: true, stdio: fd === 'ignore' ? 'ignore' : ['ignore', fd, fd], windowsHide: true,
+      }).unref();
+    } catch (e) { log(`handover helper could not start (${e.message}) — kill pid ${live.pid} manually, then start a session`); }
     return;
   }
   if (live) { log(`supervisor already running here (pid ${live.pid}, role ${live.role || '?'}, v${live.version || '?'}) — nothing to do`); return; }
@@ -532,6 +630,7 @@ function cmdEnsure(afterHandover = false) {
     // child writes to the same file. Role transitions are already log()-ed lines.
     const fd = ensureLogFd();
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'start'], {
+      env: { ...process.env, ...startEnv },
       detached: true, stdio: fd === 'ignore' ? 'ignore' : ['ignore', fd, fd], windowsHide: true,   // no flashing console window on Windows
     });
     child.unref();
@@ -542,6 +641,40 @@ function cmdEnsure(afterHandover = false) {
   } finally {
     if (locked) { try { rmSync(SPAWN_LOCK, { recursive: true, force: true }); } catch {} }
   }
+}
+
+// ===========================================================================
+// cc-bus handover <old-supervisor-pid>   (internal — spawned detached by `ensure`)
+// ===========================================================================
+async function cmdHandover(args) {
+  const oldPid = parseInt(args[0]);
+  const live = supervisorLive();
+  // Re-check under our own eyes: only ever touch the pid `ensure` named, only while the record
+  // still names it, and only if we are strictly newer (the directional rule).
+  if (!live || live.pid !== oldPid || !needsVersionHandover(live)) { log(`handover: nothing to do for pid ${oldPid}`); return; }
+  const cfg = loadConfig();
+  const loop = `http://127.0.0.1:${cfg.port}`;
+  const before = await whoami(loop, 1500);
+  let drained = false;
+  if (before && canonicalShort(String(before.host || '')) === HOST) {
+    log(`handover: asking the local leader (epoch ${before.epoch}) to DRAIN and step down`);
+    try {
+      const r = await fetch(loop + '/cc/stepdown?drain=1', { method: 'POST', headers: { Authorization: adminBearer(cfg.token) }, signal: AbortSignal.timeout(3000) });
+      drained = !!(await r.json().catch(() => ({}))).draining;   // false: a pre-3.3.4 server (ignores ?drain) or nobody to drain for
+    } catch {}
+    const end = Date.now() + HANDOVER_WAIT_MS;
+    while (Date.now() < end && await whoami(loop, 1500)) await new Promise((r) => setTimeout(r, 500));
+    if (await whoami(loop, 1500)) log('handover: ⚠️  the old server is STILL up after the drain window — killing its supervisor anyway');
+  }
+  try { process.kill(oldPid); } catch {}
+  for (let i = 0; i < 10 && pidAlive(oldPid); i++) await new Promise((r) => setTimeout(r, 250));
+  try { if (pidAlive(oldPid)) process.kill(oldPid, 'SIGKILL'); } catch {}
+  for (let i = 0; i < 10 && pidAlive(oldPid); i++) await new Promise((r) => setTimeout(r, 250));
+  // The stale heartbeat would block the respawn for up to SUPERVISOR_STALE_MS; drop it (if it is
+  // still the old one — a concurrent ensure may already have replaced it).
+  if (pidAlive(oldPid)) { log(`handover: pid ${oldPid} would not die — leaving its heartbeat in place; kill it manually, then start a session`); return; }
+  try { const s = readSupervisor(); if (s && s.pid === oldPid) rmSync(SUPERVISOR_FILE); } catch {}
+  cmdEnsure(true, drained ? { CC_START_HOLDOFF_MS: String(STEPDOWN_HOLDOFF_MS) } : {});
 }
 
 // ===========================================================================
@@ -833,7 +966,7 @@ function argOf(args, name) { const i = args.indexOf(name); return i >= 0 ? args[
 
 // Exported for the test suite (the singleton decision logic + the coverage host-matching). The
 // CLI runs only when this file is executed directly (below), so importing it for a test is inert.
-export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY, replicateSnapshot, REPLICA_FILE, DB_FILE, HOST };
+export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY, replicateSnapshot, pullSnapshot, readEpoch, writeEpoch, REPLICA_FILE, DB_FILE, HOST };
 // (failoverCoverage is exported at its definition above.)
 // SERVER_ENTRY is exported so a test can assert it resolves to a file that actually exists —
 // a self-locating path that points at a missing module makes spawnLeader crash-loop the bus,
@@ -847,6 +980,7 @@ if (invokedDirectly) {
   switch (cmd) {
     case 'start': await cmdStart(); break;
     case 'ensure': cmdEnsure(); break;
+    case 'handover': await cmdHandover(rest); break;   // internal: spawned detached by `ensure`
     case 'status': await cmdStatus(); break;
     case 'receive': await cmdReceive(rest); break;
     case 'migrate': await cmdMigrate(rest); break;

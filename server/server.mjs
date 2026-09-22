@@ -37,12 +37,15 @@ function resolveConfig(opts = {}) {
   const env = process.env;
   const int = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
   return {
-    port: Number(opts.port ?? env.PORT ?? 8787),
+    // Env reads use `||`, NOT `??` (issue 45): an EMPTY variable (`CC_BIND=`, a harness blanking
+    // it, a systemd Environment= line) is not nullish, and `listen(port, '')` binds EVERY
+    // interface — a silently exposed bus. Empty means unset. Explicit opts still win via `??`.
+    port: Number(opts.port ?? (env.PORT || 8787)),
     // The INTERFACE we bind. Default is loopback: we never silently expose 0.0.0.0 — a node that
     // must serve the estate opts in with CC_BIND (its tailnet IP or 0.0.0.0), which then also
     // trips the refuse-run-open guard unless a token is set. This is separate from `host` below,
     // which is only the display/beacon identity.
-    bind: opts.bind ?? env.CC_BIND ?? '127.0.0.1',
+    bind: (opts.bind ?? env.CC_BIND) || '127.0.0.1',
     apiKey: opts.apiKey ?? env.MCP_API_KEY ?? '',
     // A SEPARATE secret guarding the two dangerous admin routes (/cc/export full-DB download,
     // /cc/stepdown remote kill) and cc-bus's /cc/import. When unset those routes are loopback-only.
@@ -50,7 +53,7 @@ function resolveConfig(opts = {}) {
     // Explicit dev opt-in to run tokenless on a non-loopback interface (refuse-run-open otherwise).
     allowNoAuth: opts.allowNoAuth === true || env.CC_ALLOW_NO_AUTH === '1',
     epoch: Number(opts.epoch ?? env.CC_EPOCH ?? 0),
-    host: opts.host ?? env.CC_HOST ?? os.hostname(),
+    host: (opts.host ?? env.CC_HOST) || os.hostname(),
     // Where the .stepdown marker lands (issue #34); the supervisor passes CC_DATA_DIR. Unset ⇒ no marker.
     dataDir: opts.dataDir ?? env.CC_DATA_DIR ?? null,
     // /cc/stepdown ends the PROCESS (not just the listener) — true for a real spawned server; tests
@@ -140,6 +143,11 @@ function createRateLimiter({ windowMs, max }) {
  * introspect and shut down cleanly. Injectable factories (opts.createDB /
  * opts.createRestRouter) let a test drive the wiring without the real modules.
  */
+// Drain stepdown (issue 43). The deadline must exceed one replica tick (≤15s, cc-bus runClient);
+// a replica that has not pulled within ~2.5 ticks is treated as absent (nobody to drain for).
+const DRAIN_DEADLINE_MS = 20000;
+const DRAIN_REPLICA_RECENT_MS = 40000;
+
 export async function startServer(opts = {}) {
   const config = resolveConfig(opts);
   const log = opts.log ?? ((...a) => console.log(...a));
@@ -217,6 +225,33 @@ export async function startServer(opts = {}) {
 
   app.use(express.json({ limit: '64kb' }));
 
+  // ---- Drain state (issue 43: a graceful stepdown must not lose writes) ---------------
+  // POST /cc/stepdown?drain=1 flips the leader READ-ONLY, then exits as soon as a replica has
+  // pulled a snapshot taken after the last write finished (or at a deadline). Until then writes
+  // are refused with a retryable 503 instead of being accepted and silently dropped with the term.
+  //   draining        null | { since }           — set once, never cleared (the process exits)
+  //   inflightWrites  non-GET /api requests that passed the guard and have not finished: a
+  //                   snapshot only counts as FINAL when this is 0, so a write that raced the
+  //                   drain flag can never be acknowledged yet missing from the final snapshot.
+  //   lastExportAt    when a replica last pulled — no recent pull ⇒ nobody to drain for.
+  let draining = null;
+  let inflightWrites = 0;
+  let lastExportAt = 0;
+  let finishDrain = () => {};
+  function drainGuard(req, res, next) {
+    if (req.method === 'GET' || req.method === 'HEAD') return next();
+    if (draining) {
+      res.set('Retry-After', '5');
+      return res.status(503).json({ error: 'the bus leader is draining for a stepdown; retry shortly', reason: 'draining' });
+    }
+    inflightWrites++;
+    let counted = true;
+    const settle = () => { if (counted) { counted = false; inflightWrites--; } };
+    res.on('finish', settle);
+    res.on('close', settle);
+    next();
+  }
+
   // ---- Public endpoints (no auth) --------------------------------------------------
   const startedAt = Date.now();
 
@@ -239,6 +274,7 @@ export async function startServer(opts = {}) {
       role: 'leader', host: config.host, epoch: config.epoch, base: config.baseUrl,
       watermark, rev: code.rev, dirty: code.dirty,
       version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
+      ...(draining ? { draining: true } : {}),   // a drain stepdown is in progress (issue 43)
     });
   });
 
@@ -337,7 +373,7 @@ export async function startServer(opts = {}) {
   // versionGateMiddleware sits AFTER requireAuth (never a pre-auth oracle) and BEFORE the router, so
   // it gates the WHOLE data plane — send, poll-receive, work-claim, data — not just /register. This is
   // what makes a stale host actually unable to coordinate, rather than merely warned. See version-gate.mjs.
-  app.use('/api', requireAuth, versionGateMiddleware({ serverVersion, versionGateBypass }), writeLimit, makeRouter(db));
+  app.use('/api', requireAuth, versionGateMiddleware({ serverVersion, versionGateBypass }), drainGuard, writeLimit, makeRouter(db));
 
   // Fresh SQLite snapshot for replication/migration. Postgres has no local file → 501.
   app.get('/cc/export', requireAdmin, async (_req, res, next) => {
@@ -345,14 +381,20 @@ export async function startServer(opts = {}) {
       return res.status(501).json({ error: 'snapshot export is only supported on the SQLite backend' });
     }
     const tmp = path.join(os.tmpdir(), `cc-export-${Date.now()}-${process.pid}.db`);
+    // FINAL = taken while read-only with no write still in flight: it holds every acknowledged
+    // message, so once a replica has it the leader may leave with nothing lost.
+    const finalPull = !!draining && inflightWrites === 0;
     try {
       await db.snapshot(tmp);
     } catch (e) {
       return next(e);
     }
+    lastExportAt = Date.now();
+    if (draining) res.set('x-cc-draining', '1');   // tells the replica: I am leaving — follow closely
     res.download(tmp, 'messages.db', (err) => {
       fs.rm(tmp, { force: true }, () => {});
-      if (err && !res.headersSent) next(err);
+      if (err && !res.headersSent) return next(err);
+      if (!err && finalPull) finishDrain('a replica pulled the final snapshot');
     });
   });
 
@@ -364,8 +406,7 @@ export async function startServer(opts = {}) {
   // CLIENT instead of re-electing — cc-bus.mjs always EXPECTED the server to write it, but
   // nothing ever did, so a REMOTELY-triggered stepdown re-elected at an epoch tie), tear down
   // the hub, then exit — on close() resolving or a 2s deadline, whichever comes first.
-  app.post('/cc/stepdown', requireAdmin, (_req, res) => {
-    res.json({ ok: true });
+  function stepdownNow() {
     if (config.dataDir) {
       try { fs.writeFileSync(path.join(config.dataDir, '.stepdown'), String(Date.now())); } catch {}
     }
@@ -378,6 +419,38 @@ export async function startServer(opts = {}) {
         setTimeout(bye, 2000).unref?.();   // deadline: never leave a zombie if close() hangs
       }
     }, 50);
+  }
+
+  // `?drain=1` (issue 43) = the LOSS-FREE form: go read-only, leave once a replica holds the final
+  // snapshot, or at CC_DRAIN_MS (default 20s ≥ one 15s replica tick) if none shows up. With no
+  // replica pulling recently there is nobody to wait for, so it degrades to the plain form. The
+  // plain form keeps its exact semantics — migrate (the target already imported the DB) and the
+  // outranked-leader monitor (a better leader already serves) must not wait.
+  app.post('/cc/stepdown', requireAdmin, (req, res) => {
+    const wantDrain = req.query.drain === '1' && config.backend === 'sqlite';
+    const replicaRecent = lastExportAt && Date.now() - lastExportAt < DRAIN_REPLICA_RECENT_MS;
+    if (!wantDrain || !replicaRecent) {
+      // A PLAIN stepdown that arrives during a drain (the monitor found a better leader, or an
+      // operator lost patience) ends the drain now — it used to answer ok and do nothing.
+      res.json({ ok: true, draining: false, ...(draining ? { ended_drain: true } : {}) });
+      if (draining) finishDrain('a plain stepdown overrode the drain');
+      else stepdownNow();
+      return;
+    }
+    if (draining) return res.json({ ok: true, draining: true });
+    draining = { since: Date.now() };
+    const deadlineMs = Number(process.env.CC_DRAIN_MS) || DRAIN_DEADLINE_MS;
+    let finished = false;
+    finishDrain = (why) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      log(`[stepdown] drain finished after ${Date.now() - draining.since} ms: ${why}`);
+      stepdownNow();
+    };
+    const timer = setTimeout(() => finishDrain('⚠️  deadline reached with NO final snapshot pulled — writes since the last replica pull are lost'), deadlineMs);
+    log(`[stepdown] draining: read-only until a replica pulls the final snapshot (deadline ${deadlineMs} ms)`);
+    res.json({ ok: true, draining: true, deadline_ms: deadlineMs });
   });
 
   // Server-level fallback error handler (the REST router has its own; this covers /cc/* and

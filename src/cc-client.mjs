@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
 import { revString, pkgVersion } from './cc-rev.mjs';
+import { throughDrain } from './cc-retry.mjs';
 
 export class VersionGateError extends Error {
   constructor(info) { super('version_mismatch'); this.name = 'VersionGateError'; this.info = info || {}; }
@@ -48,7 +49,8 @@ export function createClient(opts = {}) {
   async function api(path, o = {}) {
     if (!TOKEN) throw new Error('no CC_TOKEN (bus config ~/.claude/.crosstalk missing?)');
     if (!BASE) { await ensureBase(true); if (!BASE) throw new Error('no bus leader found'); }
-    const r = await fetch(BASE + path, { ...o, headers: { ...headers(), ...(o.headers || {}) } });
+    // A leader mid-handover answers 503 draining: wait it out and re-send to whoever leads next.
+    const r = await throughDrain(() => fetch(BASE + path, { ...o, headers: { ...headers(), ...(o.headers || {}) } }), () => ensureBase(true));
     if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} throw new VersionGateError(info); }
     if (!r.ok) throw new Error(`${path} → ${r.status} ${await r.text().catch(() => '')}`);
     return r.json();

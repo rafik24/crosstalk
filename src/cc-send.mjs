@@ -9,7 +9,8 @@
 //
 // 'all' is sugar for the #general channel (broadcast). Exit 0 on success, 1 otherwise.
 // ---------------------------------------------------------------------------
-import { resolveFast, loadConfig } from './cc-discover.mjs';
+import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
+import { throughDrain } from './cc-retry.mjs';
 import { pkgVersion } from './cc-rev.mjs';   // x-cc-version — the fleet version gate refuses a mismatch
 
 const a = process.argv.slice(2);
@@ -28,14 +29,15 @@ const pin = opt('--base', process.env.CC_BASE) || cfg.pin;
 const TOKEN = opt('--token', process.env.CC_TOKEN) || cfg.token;
 const leader = await resolveFast({ pin, token: TOKEN });
 if (!leader) { console.error('send failed: no bus leader found (loopback / LAN / tailnet all silent)'); process.exit(1); }
-const BASE = leader.base;
+let BASE = leader.base;
 const channel = toArg === 'all' ? 'general' : toArg;
 
-const r = await fetch(BASE + '/api/messages', {
+// A leader mid-handover answers 503 draining: wait it out and re-send to whoever leads next.
+const r = await throughDrain(() => fetch(BASE + '/api/messages', {
   method: 'POST',
   headers: { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json', 'x-cc-version': pkgVersion() || '' },
   body: JSON.stringify({ channel, sender, content: body, message_type: type }),
-});
+}), async () => { BASE = (await resolveFull({ pin, token: TOKEN }))?.base ?? BASE; }, { log: (l) => console.error(l) });
 if (!r.ok) { console.error('send failed:', r.status, await r.text().catch(() => '')); process.exit(1); }
 const j = await r.json();
 console.log(`sent → #${j.channel} as ${sender} [${type}] (id ${j.id})`);
