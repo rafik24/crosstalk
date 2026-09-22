@@ -1,0 +1,17 @@
+schema_version: "1.1"
+name: handoff-ack
+tags: [a4, obedience, handoff]
+model: haiku
+runs: 1
+max_turns: 10
+timeout_seconds: 180
+allowed_tools: [Skill, Bash, Monitor, TaskStop]
+context:
+  scaffold_script: scaffold.sh
+prompt: |
+  You have just started a session on a machine enrolled on the Crosstalk bus; the SessionStart
+  join hook has printed its instructions above. Get onto the bus exactly as the hook and the
+  crosstalk skill say, using the session title "eval handoff lane" when you name yourself.
+  Once receive is armed, run `sleep 45` in Bash exactly once so the session stays open — a peer
+  is about to send you something on the bus. Then handle whatever the bus delivered strictly per
+  the crosstalk skill's rules, and finish with one short line saying what you did.

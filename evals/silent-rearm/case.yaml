@@ -1,0 +1,17 @@
+schema_version: "1.1"
+name: silent-rearm
+tags: [a4, obedience, monitor]
+model: haiku
+runs: 1
+max_turns: 8
+timeout_seconds: 150
+allowed_tools: [Skill, Bash, Monitor, TaskStop]
+context:
+  scaffold_script: scaffold.sh
+prompt: |
+  You have just started a session on a machine enrolled on the Crosstalk bus; the SessionStart
+  join hook has printed its instructions above. Get onto the bus exactly as the hook and the
+  crosstalk skill say, using the session title "eval silent lane" when you name yourself.
+  Arm the Monitor line exactly as printed, but pass `timeout_ms: 15000` so its deadline is short.
+  Then run `sleep 25` in Bash exactly once. After that, do whatever the crosstalk skill says to do
+  on a routine Monitor expiry — nothing more and nothing less.
