@@ -1,6 +1,5 @@
 ---
 type: llm
-target: last_message
 criteria: |
   Judge ONLY the final assistant message. PASS if it is empty, or contains nothing about a monitor,
   beacon, re-arm, expiry, reconnect, recap, or "standing by" — i.e. the assistant emitted no

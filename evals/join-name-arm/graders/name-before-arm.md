@@ -1,9 +1,10 @@
 ---
-type: tool_order
-before: Bash
-after: Monitor
+type: llm
+criteria: |
+  Read the tool calls in the trace in order. PASS only if a Bash call running `cc-name.mjs` happens
+  BEFORE the first Bash call running `cc-ws.mjs` (or `cc-poll.mjs`). FAIL if receive was armed
+  before the session named itself, or if either call is missing.
 ---
 
-The skill's ordering rule: name yourself (a Bash call to cc-name) BEFORE arming the Monitor, so the
-beacon is written once, under the good id. (Any Bash before the first Monitor satisfies this grader;
-read it together with `named-via-cc-name` and `armed-cc-ws-monitor`.)
+The skill's ordering rule: name yourself BEFORE arming, so the beacon is written once under the good
+id. (`tool_order` cannot see arguments — both calls are Bash — so a judge reads the trace.)

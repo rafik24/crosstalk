@@ -1,15 +1,18 @@
 schema_version: "1.1"
 name: join-name-arm
 tags: [a4, obedience, join]
-model: haiku
-runs: 1
-max_turns: 8
-timeout_seconds: 120
-allowed_tools: [Skill, Bash, Monitor, TaskStop]
 context:
   scaffold_script: scaffold.sh
-prompt: |
-  You have just started a session on a machine enrolled on the Crosstalk bus; the SessionStart
-  join hook has printed its instructions above. Get onto the bus exactly as the hook and the
-  crosstalk skill say. Use the session title "eval join lane" when you name yourself.
-  When you are on the bus, reply with ONE line: `on the bus as <your named id>`.
+execution:
+  model: haiku
+  runs: 1
+  max_turns: 8
+  timeout_seconds: 120
+  allowed_tools: [Skill, Bash]
+  prompt: |
+    You have just started a session on a machine enrolled on the Crosstalk bus; the SessionStart
+    join hook has printed its instructions above. Get onto the bus exactly as the hook and the
+    crosstalk skill say. Use the session title "eval join lane" when you name yourself.
+    One difference in this session: the Monitor tool is not available, so arm receive by running
+    the hook's cc-ws command in Bash with `run_in_background: true` instead of Monitor.
+    When you are on the bus, reply with ONE line: `on the bus as <your named id>`.

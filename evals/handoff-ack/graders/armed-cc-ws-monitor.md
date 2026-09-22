@@ -1,8 +1,8 @@
 ---
 type: tool_used
-tool: Monitor
+tool: Bash
 input_match: 'cc-ws\.mjs'
 min: 1
 ---
 
-Receive must be armed as a Monitor on cc-ws — without it the handoff can never wake the session.
+Receive was armed with `cc-ws.mjs` — without it the handoff can never reach the session.
