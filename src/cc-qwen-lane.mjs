@@ -13,7 +13,9 @@
 //      ONE MCP server (`crosstalk` = src/cc-qwen-mcp.mjs, identity in its env), mcp.allowed = [crosstalk],
 //      permissions.allow = [mcp__crosstalk], approvalMode default, hooks disabled. The operator's own
 //      ~/.qwen is untouched and only supplies model providers.
-//   3. start `qwen serve` (loopback) with that layer, create ONE session
+//   3. start `qwen serve` on a RANDOM loopback port with --require-auth and a minted bearer (QWEN_SERVER_TOKEN,
+//      env not argv), verify the responder is OUR child (exitCode null, /health 200 with the bearer AND 401 without),
+//      create ONE session
 //   4. VERIFY THE EFFECTIVE TOOL INVENTORY of the live daemon (GET /workspace/tools for built-ins, GET /workspace/mcp
 //      for servers + their tools): any built-in, any MCP server but `crosstalk`, any tool that is not
 //      mcp__crosstalk__bus_* → tear everything down, exit 3. This is what keeps a future
@@ -24,10 +26,11 @@
 //   node cc-qwen-lane.mjs stop   --lane <identity>
 //   node cc-qwen-lane.mjs profile --id <identity> [--model ID]        # print the lockdown settings (no side effects)
 //   node cc-qwen-lane.mjs inventory --serve URL                        # exit 0 / 3 + the offending tools
-//   env: QWEN_BIN (default `qwen`; a *.mjs path is run with node — tests), CC_QWEN_UNSAFE_PROFILE=1 (loud override of step 4)
+//   env: QWEN_BIN (default `qwen`; a *.mjs path is run with node — tests). There is NO override of step 4.
 // Zero deps.
 // ---------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { mkdirSync, writeFileSync, readFileSync, openSync, rmSync, realpathSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir, hostname } from 'node:os';
@@ -85,8 +88,8 @@ export function inventoryViolations(body) {
 // Built-ins come from GET /workspace/tools (validated: a default profile lists agent, run_shell_command, …; the
 // lockdown lists none). MCP tools are NOT in that list — they hang off GET /workspace/mcp (+ /<server>/tools),
 // so both are read, and the set of MCP SERVERS must be exactly [crosstalk].
-export async function liveInventory(serve) {
-  const get = async (p) => { const r = await fetch(serve + p, { signal: AbortSignal.timeout(10000) }); if (!r.ok) throw new Error(`GET ${p} → HTTP ${r.status}`); return r.json(); };
+export async function liveInventory(serve, headers = {}) {
+  const get = async (p) => { const r = await fetch(serve + p, { headers, signal: AbortSignal.timeout(10000) }); if (!r.ok) throw new Error(`GET ${p} → HTTP ${r.status}`); return r.json(); };
   const violations = []; const names = [];
   try {
     const t = await get('/workspace/tools');
@@ -104,6 +107,8 @@ export async function liveInventory(serve) {
   return { violations, names };
 }
 
+export const bearer = (t) => (t ? { Authorization: 'Bearer ' + t } : {});
+export function freePort() { return new Promise((res, rej) => { const srv = createServer(); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => res(p)); }); srv.on('error', rej); }); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const slug = (s) => String(s).toLowerCase().replace(/[\s_]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'misc';
 
@@ -113,7 +118,7 @@ async function main() {
   const usage = () => { console.error('usage: cc-qwen-lane.mjs start --topic <name> [--workspace DIR] [--port N] [--model ID] | stop --lane <id> | profile --id <id> | inventory --serve URL'); process.exit(2); };
 
   if (cmd === 'profile') { const id = opt('--id'); if (!id) usage(); console.log(JSON.stringify(lockdownSettings({ id, model: opt('--model', null) }), null, 2)); return; }
-  if (cmd === 'inventory') { const s = opt('--serve'); if (!s) usage(); const inv = await liveInventory(s); console.log(inv.violations.length ? `⛔ ${inv.violations.length} tool(s) a bus lane must not have: ${inv.violations.join(', ')}` : `inventory ok (${inv.names.join(', ') || 'no tools'})`); process.exit(inv.violations.length ? 3 : 0); }
+  if (cmd === 'inventory') { const s = opt('--serve'); if (!s) usage(); const inv = await liveInventory(s, bearer(process.env.QWEN_SERVER_TOKEN)); console.log(inv.violations.length ? `⛔ ${inv.violations.length} tool(s) a bus lane must not have: ${inv.violations.join(', ')}` : `inventory ok (${inv.names.join(', ') || 'no tools'})`); process.exit(inv.violations.length ? 3 : 0); }
 
   if (cmd === 'stop') {
     const id = opt('--lane'); if (!id) usage();
@@ -128,7 +133,8 @@ async function main() {
   const topic = slug(opt('--topic', 'lane'));
   const machine = slug(hostname()) || 'unknown';
   const id = `${machine}/qwen-${topic}-${randomBytes(4).toString('hex')}`;
-  const port = Number(opt('--port', 4170)); const serve = `http://127.0.0.1:${port}`;
+  const port = Number(opt('--port', 0)) || await freePort(); const serve = `http://127.0.0.1:${port}`;
+  const token = randomBytes(24).toString('hex'); const auth = bearer(token);
   const dir = join(LANES_DIR, id.replace(/[^A-Za-z0-9._-]/g, '_'));
   const workspace = resolve(opt('--workspace', join(dir, 'workspace')));
   mkdirSync(dir, { recursive: true }); mkdirSync(workspace, { recursive: true });
@@ -140,28 +146,36 @@ async function main() {
   // QWEN_BIN may be a *.mjs/*.js file (run under this node) so tests can substitute a fake daemon without a shell.
   const qbin = process.env.QWEN_BIN || 'qwen';
   const [qfile, qpre] = /\.(mjs|cjs|js)$/i.test(qbin) ? [process.execPath, [qbin]] : [qbin, []];
-  const child = spawn(qfile, [...qpre, 'serve', '--port', String(port), '--hostname', '127.0.0.1', '--workspace', workspace, '--max-sessions', '1'],
-    { cwd: workspace, env: { ...process.env, QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsPath }, detached: true, stdio: ['ignore', log, log] });
+  const child = spawn(qfile, [...qpre, 'serve', '--port', String(port), '--hostname', '127.0.0.1', '--workspace', workspace, '--max-sessions', '1', '--require-auth'],
+    { cwd: workspace, env: { ...process.env, QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsPath, QWEN_SERVER_TOKEN: token }, detached: true, stdio: ['ignore', log, log] });
   child.unref();
-  const state = { id, servePid: child.pid, serve, workspace, settingsPath };
+  const state = { id, servePid: child.pid, serve, workspace, settingsPath };   // the token is never written to disk
   const abort = (why, code = 3) => { try { process.kill(-child.pid, 'SIGTERM'); } catch { try { process.kill(child.pid, 'SIGTERM'); } catch {} } console.log(`⛔ lane NOT started — ${why}`); process.exit(code); };
-  let up = false; for (let i = 0; i < 80 && !up; i++) { try { up = (await fetch(serve + '/health', { signal: AbortSignal.timeout(1000) })).ok; } catch {} if (!up) await sleep(500); }
+  // The responder must be OUR child: alive, answering /health only WITH our minted bearer. A foreign daemon on the
+  // port (tokenless, or someone else's token) fails one of the two probes; a child that died leaves nothing to trust.
+  let up = false;
+  for (let i = 0; i < 80 && !up; i++) {
+    if (child.exitCode !== null || child.signalCode !== null) abort(`qwen serve exited during startup (code ${child.exitCode}, signal ${child.signalCode}) — see ${join(dir, 'qwen-serve.log')}`, 1);
+    try { up = (await fetch(serve + '/health', { headers: auth, signal: AbortSignal.timeout(1000) })).ok; } catch {}
+    if (!up) await sleep(500);
+  }
   if (!up) abort(`qwen serve did not come up on ${serve} (see ${join(dir, 'qwen-serve.log')})`, 1);
-  const s = await (await fetch(serve + '/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: workspace }) })).json().catch(() => ({}));
+  let anon = 0; try { anon = (await fetch(serve + '/health', { signal: AbortSignal.timeout(2000) })).status; } catch {}
+  if (anon !== 401 && anon !== 403) abort(`the daemon on ${serve} answers /health WITHOUT our bearer (HTTP ${anon}) — not our authenticated child; refusing to drive it`);
+  const s = await (await fetch(serve + '/session', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ cwd: workspace }) })).json().catch(() => ({}));
   if (!s.sessionId) abort('qwen serve refused the session: ' + JSON.stringify(s).slice(0, 200), 1);
 
   // step 4 — the boundary check. A daemon that is still initializing is polled (bounded); it never passes by default.
-  let inv = await liveInventory(serve);
-  for (let i = 0; i < 20 && inv.violations.some((v) => /not initialized/.test(v)); i++) { await sleep(750); inv = await liveInventory(serve); }
-  if (inv.violations.length && process.env.CC_QWEN_UNSAFE_PROFILE === '1') console.log(`⚠️ UNSAFE lane accepted by CC_QWEN_UNSAFE_PROFILE=1: ${inv.violations.join(', ')}`);
-  if (inv.violations.length && process.env.CC_QWEN_UNSAFE_PROFILE !== '1') abort(`the live session exposes tools a bus lane must not have: ${inv.violations.join(', ')} (Qwen upgrade? re-audit BUILTIN_TOOLS)`);
+  let inv = await liveInventory(serve, auth);
+  for (let i = 0; i < 20 && inv.violations.some((v) => /not initialized/.test(v)); i++) { await sleep(750); inv = await liveInventory(serve, auth); }
+  if (inv.violations.length) abort(`the live session exposes tools a bus lane must not have: ${inv.violations.join(', ')} (Qwen upgrade? re-audit BUILTIN_TOOLS)`);
   if (!inv.names.some((n) => ALLOWED_TOOL.test(n))) abort('the crosstalk MCP tools are not registered in the live session (MCP server failed to start?)');
 
   const listen = join(homedir(), '.claude', '.cc-listen'); mkdirSync(listen, { recursive: true });
   writeFileSync(join(listen, s.sessionId + '.id'), id);
   const blog = openSync(join(dir, 'bridge.log'), 'a');
   const bridge = spawn(process.execPath, [join(HERE, 'cc-qwen-bridge.mjs'), 'run', id, '--session', s.sessionId, '--serve', serve],
-    { env: { ...process.env, CC_QWEN_REPLY: 'mcp', CC_QWEN_LANE_VERIFIED: '1', CC_DESC: `qwen lane: ${topic}` }, detached: true, stdio: ['ignore', blog, blog] });
+    { env: { ...process.env, CC_QWEN_REPLY: 'mcp', QWEN_SERVER_TOKEN: token, CC_DESC: `qwen lane: ${topic}` }, detached: true, stdio: ['ignore', blog, blog] });   // the bridge re-verifies the inventory itself
   bridge.unref();
   writeFileSync(join(dir, 'lane.json'), JSON.stringify({ ...state, sessionId: s.sessionId, bridgePid: bridge.pid, tools: inv.names }, null, 2));
   console.log(`✅ Qwen bus lane up: ${id}\n   serve ${serve} (pid ${child.pid}) · session ${s.sessionId} · bridge pid ${bridge.pid}\n   tools: ${inv.names.join(', ')}\n   dir ${dir}\n   stop: node ${fileURLToPath(import.meta.url)} stop --lane ${id}`);

@@ -26,7 +26,8 @@
 //   node cc-qwen-bridge.mjs stop   --session <sid>
 //   node cc-qwen-bridge.mjs check                                                  # exit 0 / 3: is this Qwen profile safe to feed bus text? (no network)
 // `ensure` runs the same check and FAILS CLOSED (exit 3, nothing spawned).
-//   env: QWEN_SERVE_URL (default http://127.0.0.1:4170), QWEN_SERVER_TOKEN (bearer, when the daemon
+//   env: CC_QWEN_REPLY=mcp (v2 lane: typed-tool footer + LIVE inventory verification at start and every tick),
+//        QWEN_SERVE_URL (default http://127.0.0.1:4170), QWEN_SERVER_TOKEN (bearer, when the daemon
 //        runs with --require-auth or off-loopback), CC_SESSION_CHECK_MS, CC_DAEMON_GRACE_MS, CC_QUEUE_TIMEOUT_MS
 //
 // Files (next to the beacon the listen-gate reads): ~/.claude/.cc-listen/<sid>.bridge.pid + .bridge.log
@@ -39,6 +40,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './cc-discover.mjs';
 import { createReceiver, LIVE_DIR, beaconPath } from './cc-receive.mjs';
+import { liveInventory, bearer } from './cc-qwen-lane.mjs';
 
 const SESSION_CHECK_MS = Number(process.env.CC_SESSION_CHECK_MS || 20000);
 const DAEMON_GRACE_MS = Number(process.env.CC_DAEMON_GRACE_MS || 120000);
@@ -149,6 +151,16 @@ function main() {
     const instance = args[1];
     if (!instance || instance.startsWith('--')) usage();
     const target = serveTarget(opt('--serve', process.env.QWEN_SERVE_URL), process.env.QWEN_SERVER_TOKEN);
+    const V2 = process.env.CC_QWEN_REPLY === 'mcp';
+    // The boundary is verified HERE, by the process that feeds the session — never trusted from an env flag (reviewer):
+    // v2 lane → the LIVE tool inventory of the daemon (built-ins + MCP servers/tools), at start and on every tick;
+    // v1 hook path → the settings-file heuristic (defence in depth only).
+    const verifyInventory = async (why) => {
+      const inv = await liveInventory(target.base, bearer(process.env.QWEN_SERVER_TOKEN));
+      if (inv.violations.length) { console.error(`⛔ bridge refusing to feed this session (${why}): tools a bus lane must not have: ${inv.violations.join(', ')}`); return false; }
+      return true;
+    };
+    if (V2 ? !(await verifyInventory('at start')) : !profileGate()) process.exit(3);
     const cfg = loadConfig();
     const ONLY = opt('--channel', null);
     try { mkdirSync(LIVE_DIR, { recursive: true }); writeFileSync(pidFile, String(process.pid)); } catch {}
@@ -176,6 +188,7 @@ function main() {
     process.on('SIGTERM', () => bye('SIGTERM')); process.on('SIGINT', () => bye('SIGINT'));
     let gone = 0, unreachableSince = 0;
     setInterval(async () => {
+      if (V2 && !(await verifyInventory('periodic re-check'))) bye('tool inventory widened');
       const s = await sessionState(target, SID);
       if (s === 'alive') { gone = 0; unreachableSince = 0; return; }
       if (s === 'gone') { if (++gone >= 2) bye(`qwen serve session ${SID} no longer exists`); return; }
@@ -187,7 +200,6 @@ function main() {
   }
 
   function profileGate() {
-    if (process.env.CC_QWEN_LANE_VERIFIED === '1') return true;   // cc-qwen-lane.mjs verified the live tool inventory
     const problems = laneProfileProblems();
     if (!problems.length) return true;
     if (process.env.CC_QWEN_UNSAFE_PROFILE === '1') { console.log(`⚠️ UNSAFE Qwen profile accepted by CC_QWEN_UNSAFE_PROFILE=1: ${problems.join('; ')}`); return true; }

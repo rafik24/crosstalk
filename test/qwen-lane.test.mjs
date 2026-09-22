@@ -25,19 +25,20 @@ const SERVER = join(__dirname, '..', 'server', 'server.mjs');
 const LANE = join(__dirname, '..', 'src', 'cc-qwen-lane.mjs');
 const FAKE = join(__dirname, 'fixtures', 'qwen-serve-fake.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const PORT = Number(process.env.CC_TEST_PORT || 8792), SERVE_PORT = Number(process.env.CC_TEST_SERVE_PORT || 4169);
+const PORT = Number(process.env.CC_TEST_PORT || 8792);
 const HOME = mkdtempSync(join(tmpdir(), 'ccqlane-home-')), DATA = mkdtempSync(join(tmpdir(), 'ccqlane-data-')), CACHE = mkdtempSync(join(tmpdir(), 'ccqlane-cache-'));
 const BASE = `http://127.0.0.1:${PORT}`, TOKEN = 'tt';
 mkdirSync(join(HOME, '.claude'), { recursive: true });
 const CFG = join(HOME, '.claude', '.crosstalk'); writeFileSync(CFG, `CC_TOKEN=${TOKEN}\nCC_BASE=${BASE}\nCC_PORT=${PORT}\n`);
 const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot || '', HOME, USERPROFILE: HOME, CC_BUS_CONFIG: CFG, CC_CACHE_DIR: CACHE, CC_PORT: String(PORT),
-  CC_BEACON_PORT: String(process.env.CC_TEST_BEACON_PORT || 8894), QWEN_BIN: FAKE, CC_SESSION_CHECK_MS: '60000' };
+  CC_BEACON_PORT: String(process.env.CC_TEST_BEACON_PORT || 8894), QWEN_BIN: FAKE, CC_SESSION_CHECK_MS: '1500' };
 let failed = false;
 const ok = (c, m) => { if (!c) { failed = true; console.error('❌', m); } else console.log('  ✓', m); };
 const pidAlive = (p) => { try { process.kill(p, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const until = async (fn, ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await sleep(100); } return fn(); };
 const LISTEN = join(HOME, '.claude', '.cc-listen');
-const start = (mode, extra = {}) => { const envOut = join(HOME, `fake-env-${mode}.json`); const r = spawnSync(process.execPath, [LANE, 'start', '--topic', 'unit test', '--port', String(SERVE_PORT)], { env: { ...env, FAKE_MODE: mode, FAKE_ENV_OUT: envOut, ...extra }, encoding: 'utf8', timeout: 90000 }); let fake = {}; try { fake = JSON.parse(readFileSync(envOut, 'utf8')); } catch {} return { ...r, fake }; };
+const MODE_FILE = join(HOME, 'fake-mode');
+const start = (mode, extra = {}) => { const envOut = join(HOME, `fake-env-${mode}.json`); writeFileSync(MODE_FILE, mode); const r = spawnSync(process.execPath, [LANE, 'start', '--topic', 'unit test'], { env: { ...env, FAKE_MODE_FILE: MODE_FILE, FAKE_ENV_OUT: envOut, ...extra }, encoding: 'utf8', timeout: 90000 }); let fake = {}; try { fake = JSON.parse(readFileSync(envOut, 'utf8')); } catch {} return { ...r, fake, serve: (r.stdout.match(/serve (http:\/\/127\.0\.0\.1:\d+)/) || [])[1] }; };
 
 console.log('P profile (pure)');
 {
@@ -67,12 +68,16 @@ try {
     ok(r.status === 3 && /lane NOT started/.test(r.stdout) && expect.test(r.stdout) && gone && idFiles.length === 0, `${mode}: exit 3, reason named, daemon killed, no session→id file, no bridge (${(r.stdout.match(/—.*$/m) || [''])[0].slice(2, 110)})`);
   }
 
-  console.log('O override');
+  console.log('O no override');
   let r = start('builtin', { CC_QWEN_UNSAFE_PROFILE: '1' }); if (r.fake.pid) toKill.push(r.fake.pid);
-  ok(r.status === 0 && /UNSAFE lane accepted/.test(r.stdout), 'CC_QWEN_UNSAFE_PROFILE=1 starts the lane anyway — and says so loudly');
-  let id = (r.stdout.match(/Qwen bus lane up: (\S+)/) || [])[1];
-  spawnSync(process.execPath, [LANE, 'stop', '--lane', id], { env, encoding: 'utf8' }); await until(() => !pidAlive(r.fake.pid), 5000);
-  for (const f of existsSync(LISTEN) ? readdirSync(LISTEN) : []) if (f.endsWith('.id')) rmSync(join(LISTEN, f));
+  ok(r.status === 3 && !/UNSAFE/.test(r.stdout) && /lane NOT started/.test(r.stdout), 'CC_QWEN_UNSAFE_PROFILE=1 changes nothing — still refused');
+
+  let id;
+  console.log('A auth / own-child checks');
+  r = start('tokenless'); if (r.fake.pid) toKill.push(r.fake.pid);
+  ok(r.status === 3 && /WITHOUT our bearer/.test(r.stdout) && await until(() => !pidAlive(r.fake.pid), 5000), 'a daemon that answers /health without the bearer (foreign / tokenless) → refused and killed');
+  r = start('die');
+  ok(r.status === 1 && /exited during startup/.test(r.stdout), 'a child that dies during startup → refused (its port is never trusted)');
 
   console.log('C clean start + stop');
   r = start('clean'); if (r.fake.pid) toKill.push(r.fake.pid);
@@ -81,18 +86,25 @@ try {
   const laneDir = join(LISTEN, 'qwen-lanes', String(id).replace(/[^A-Za-z0-9._-]/g, '_'));
   const st = JSON.parse(readFileSync(join(laneDir, 'lane.json'), 'utf8')); toKill.push(st.bridgePid);
   ok(r.fake.settingsPath === join(laneDir, 'lockdown-settings.json') && JSON.parse(readFileSync(r.fake.settingsPath, 'utf8')).mcpServers.crosstalk.env.CC_LANE_ID === id, 'the daemon was handed the lockdown layer via QWEN_CODE_SYSTEM_SETTINGS_PATH, identity pinned inside it');
-  ok(r.fake.argv.includes('--max-sessions') && r.fake.argv[r.fake.argv.indexOf('--hostname') + 1] === '127.0.0.1', 'daemon started loopback-only with --max-sessions 1');
+  ok(r.fake.argv.includes('--max-sessions') && r.fake.argv[r.fake.argv.indexOf('--hostname') + 1] === '127.0.0.1' && r.fake.argv.includes('--require-auth') && r.fake.hadToken && !r.fake.argv.some((x) => /^[0-9a-f]{48}$/.test(x)), 'daemon started loopback-only, --max-sessions 1, --require-auth, token via env (not argv)');
+  const port = Number(r.fake.argv[r.fake.argv.indexOf('--port') + 1]);
+  ok(port > 1024 && r.serve === `http://127.0.0.1:${port}` && !/lockdown|token/i.test(readFileSync(join(laneDir, 'lane.json'), 'utf8').replace(/lockdown-settings/g, '')), 'random port reported; the token is not written to lane.json');
   ok(readFileSync(join(LISTEN, st.sessionId + '.id'), 'utf8') === id, 'session→id map written for the listen gate');
   ok(await until(() => existsSync(join(LISTEN, id.replace(/[^A-Za-z0-9._-]/g, '_'))), 20000), 'bridge attached and beats the listen beacon');
   const roster = await (await fetch(BASE + '/api/instances', { headers: { Authorization: 'Bearer ' + TOKEN, 'x-cc-version': pkgVersion() || '' } })).json();
   ok((roster.instances || roster).some((i) => i.instance_id === id && i.status === 'online'), 'lane is online on the bus under the minted identity');
+  console.log('W widening after start');
+  writeFileSync(MODE_FILE, 'builtin');                                   // the live daemon now exposes run_shell_command
+  ok(await until(() => !pidAlive(st.bridgePid), 10000), 'the bridge noticed on its next tick and exited (tool inventory widened)');
+  ok(/tool inventory widened|must not have: run_shell_command/.test(readFileSync(join(laneDir, 'bridge.log'), 'utf8')), 'with the reason in its log');
+  writeFileSync(MODE_FILE, 'clean');
   spawnSync(process.execPath, [LANE, 'stop', '--lane', id], { env, encoding: 'utf8' });
-  ok(await until(() => !pidAlive(st.servePid) && !pidAlive(st.bridgePid), 8000), '`stop` takes the daemon and the bridge down');
+  ok(await until(() => !pidAlive(st.servePid) && !pidAlive(st.bridgePid), 8000), '`stop` takes the daemon (and the bridge) down');
 } catch (e) { failed = true; console.error('❌', e.message); }
 finally {
   for (const p of toKill) if (p) { try { process.kill(p, 'SIGKILL'); } catch {} }
   try { server.kill('SIGKILL'); } catch {}
   for (const d of [HOME, DATA, CACHE]) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 }
-console.log(failed ? '❌ qwen-lane.test FAILED' : '✅ qwen-lane.test: all assertions passed (lockdown profile, inventory rules, 7 refusals fail closed, loud override, clean start/stop)');
+console.log(failed ? '❌ qwen-lane.test FAILED' : '✅ qwen-lane.test: all assertions passed (lockdown profile, inventory rules, 7 refusals fail closed, no override, auth/own-child, clean start, widening, stop)');
 process.exit(failed ? 1 : 0);

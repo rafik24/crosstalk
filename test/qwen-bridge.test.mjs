@@ -16,7 +16,9 @@
 //   F. SAFETY: a non-loopback --serve target without QWEN_SERVER_TOKEN is refused;
 //   G. FAIL-CLOSED PROFILE (reviewer B1): `ensure` refuses (exit 3, nothing spawned) when the Qwen profile allows "*" /
 //      an unscoped shell rule / yolo, when a PROJECT .qwen/settings.json widens it, or when the shell gate is not wired;
-//   H. a configured QWEN_SERVER_TOKEN reaches the daemon as a bearer;  L. the #27 stale-beacon REPLACE path (one bridge, new pid).
+//   H. a configured QWEN_SERVER_TOKEN reaches the daemon as a bearer;  L. the #27 stale-beacon REPLACE path (one bridge, new pid);
+//   M. v2 lane mode: the bridge verifies the LIVE inventory itself at start (built-in present → refuses; an env flag
+//      bypasses nothing) and its footer names the typed tools, never a command line.
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +54,9 @@ const fakeServer = createServer((req, res) => {
   req.on('data', (d) => { body += d; });
   req.on('end', () => {
     const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (req.url === '/workspace/tools') return json(200, { v: 1, initialized: true, tools: fake.builtins || [] });
+    if (req.url === '/workspace/mcp') return json(200, { v: 1, servers: [{ name: 'crosstalk' }] });
+    if (req.url === '/workspace/mcp/crosstalk/tools') return json(200, { v: 1, tools: ['bus_send', 'bus_ack', 'bus_done', 'bus_peers'].map((n) => ({ name: 'mcp__crosstalk__' + n })) });
     const m = req.url.match(/^\/session\/([^/]+)\/(prompt|status)$/);
     if (!m) return json(404, { error: 'no route' });
     if (decodeURIComponent(m[1]) !== SID || !fake.sessionAlive) return json(404, { error: 'No session', code: 'session_not_found' });
@@ -173,6 +178,28 @@ try {
   ok(pid2 && pid2 !== bridgePid && pidAlive(pid2), 'ensure starts a fresh bridge afterwards');
   spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID], { env, encoding: 'utf8' });
   ok(await until(() => !pidAlive(pid2), 3000) && !existsSync(pidFile), '`stop` kills the bridge and clears the pid file');
+
+  console.log('M v2 lane mode (CC_QWEN_REPLY=mcp)');
+  {
+    const run = (extra) => { const r = spawnSync(process.execPath, [BRIDGE, 'ensure', ID, '--session', SID], { env: { ...env, CC_QWEN_REPLY: 'mcp', ...extra }, encoding: 'utf8', timeout: 20000 }); return r; };
+    fake.builtins = [{ name: 'run_shell_command' }];
+    run({}); await sleep(2500);
+    ok(!pidAlive(readPid()) && /refusing to feed this session \(at start\).*run_shell_command/.test(readFileSync(bridgeLog, 'utf8')), 'v2 bridge verifies the LIVE inventory itself at start: a built-in present → exits, nothing fed');
+    run({ CC_QWEN_LANE_VERIFIED: '1' }); await sleep(2500);
+    ok(!pidAlive(readPid()), 'an inherited CC_QWEN_LANE_VERIFIED=1 env flag bypasses NOTHING (still refused)');
+    fake.builtins = [];
+    try { rmSync(pidFile, { force: true }); } catch {}
+    const nConn = () => (existsSync(bridgeLog) ? (readFileSync(bridgeLog, 'utf8').match(/push connected/g) || []).length : 0);
+    const c0 = nConn(); run({}); const pidM = readPid();
+    ok(await until(() => nConn() > c0 && pidAlive(pidM), 15000), 'clean inventory → v2 bridge attaches');
+    await sleep(500);
+    await send('dm-qwen-lane-bbbbbbbb', 'hello-M');
+    ok(await until(() => got('hello-M').length === 1, 3000) && /bus_send/.test(got('hello-M')[0].text) && /channel "dm-qwen-lane-bbbbbbbb"/.test(got('hello-M')[0].text) && !/node \S*cc-codex\.mjs|--type response/.test(got('hello-M')[0].text), 'MCP-mode footer names bus_send + the channel, never a command line');
+    if (!/bus_send/.test(got('hello-M')[0].text)) console.log('    footer was:', JSON.stringify(got('hello-M')[0].text.slice(-300)));
+    await send('general', `@${ID} board handoff — work #9 is now yours`, 'tester', 'handoff');
+    ok(await until(() => got('work #9').length === 1, 3000) && /bus_ack.*channel "all"/.test(got('work #9')[0].text), 'a handoff footer names bus_ack FIRST with channel "all"');
+    spawnSync(process.execPath, [BRIDGE, 'stop', '--session', SID], { env, encoding: 'utf8' }); await until(() => !pidAlive(pidM), 3000);
+  }
 
   console.log('L stale-beacon replace (#27) + H bearer');
   const envTok = { ...env, QWEN_SERVER_TOKEN: 'serve-secret' };

@@ -51,6 +51,7 @@ export const TOOLS = [
 ];
 
 // Pure argument validation → { channel, content, type } or throws Error(reason). Exported for the tests.
+export function sanitizedText(raw) { return validate('bus_send', { channel: 'x', text: raw }, { allowBroadcast: true }).content; }
 export function validate(tool, args, { allowBroadcast = process.env.CC_LANE_ALLOW_BROADCAST === '1' } = {}) {
   const a = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
   const spec = TOOLS.find((t) => t.name === tool);
@@ -63,7 +64,11 @@ export function validate(tool, args, { allowBroadcast = process.env.CC_LANE_ALLO
   if (!CHANNEL_RE.test(channel)) throw new Error('channel must match [a-z0-9][a-z0-9._-]{0,63} (e.g. dm-some-lane, or "all")');
   const raw = tool === 'bus_ack' ? a.note : a.text;
   if (typeof raw !== 'string' || !raw.trim()) throw new Error(`${tool === 'bus_ack' ? 'note' : 'text'} must be a non-empty string`);
-  let content = raw.replace(/\u0000/g, '').trim();
+  // A prompt-injected lane must not be able to forge a bus header: CR/LF/LS/PS collapse to plain newlines, bidi and
+  // other format controls are dropped, NUL too, and any line that would render as a bus header ("CHAT #…") is
+  // visibly prefixed (#51 tracks the core render-side fix; this is the sender-side belt).
+  let content = String(raw).replace(/\r\n?|\u2028|\u2029/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
+    .split('\n').map((l) => (/^\s*CHAT #/.test(l) ? '· ' + l.trimStart() : l)).join('\n').trim();
   if (content.length > MAX_TEXT) throw new Error(`text is ${content.length} characters; the cap is ${MAX_TEXT}`);
   if (!allowBroadcast && BROADCAST_RE.test(content)) throw new Error('broadcast mentions (@all / @here / @everyone) are not allowed from this lane');
   let type = 'message';
