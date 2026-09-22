@@ -341,7 +341,7 @@ async function cmdStart() {
     log(`no bus present → becoming LEADER at epoch ${epoch} (port ${port})`);
     child = spawnLeader(epoch, port, token);
     // CC_DISCOVERY=peers: a confined bus neither scans nor ADVERTISES itself on the LAN.
-    stopBeacon = cfg.discovery === 'peers' ? null : startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort });
+    stopBeacon = cfg.discovery === 'peers' ? null : startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort, token });
 
     child.on('exit', (code) => {
       if (stopBeacon) { stopBeacon(); stopBeacon = null; }
@@ -820,7 +820,7 @@ async function cmdReceive(args) {
           const promote = () => {
             if (promoted) return; promoted = true;
             const child = spawnLeader(newEpoch, port, token);
-            const stop = startBeacon({ host: HOST, epoch: newEpoch, port, beaconPort: cfg.beaconPort });
+            const stop = startBeacon({ host: HOST, epoch: newEpoch, port, beaconPort: cfg.beaconPort, token });
             child.on('exit', (code) => {
               stop();
               // A migrate-promoted leader must NOT just die on its server's exit — that left the

@@ -27,6 +27,7 @@ import { createDB } from './db.mjs';
 import { createRestRouter } from './rest-api.mjs';
 import { attachWsHub, originAllowed } from './ws-hub.mjs';
 import { versionGateMiddleware } from './version-gate.mjs';
+import { whoamiProof } from '../src/cc-proof.mjs';
 import { codeRev, pkgVersion } from '../src/cc-rev.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -268,13 +269,18 @@ export async function startServer(opts = {}) {
   //   watermark    highest message id served — the freshness tiebreak for election.
   //   rev / dirty  the running code revision of this leader's checkout, so the estate can spot a
   //                leader silently serving stale code (the drift check the rewrite had dropped).
-  app.get('/cc/whoami', (_req, res) => {
+  app.get('/cc/whoami', (req, res) => {
     const code = codeRev();
+    // Discovery authentication (issue 55): a caller that sends a nonce gets back an HMAC over
+    // (nonce, host, epoch) keyed by the estate token — the only way it can tell this leader
+    // from a forger advertising a huge epoch. The answer without a nonce is unchanged (public).
+    const n = typeof req.query.nonce === 'string' && /^[0-9a-f]{16,64}$/.test(req.query.nonce) ? req.query.nonce : null;
     res.json({
       role: 'leader', host: config.host, epoch: config.epoch, base: config.baseUrl,
       watermark, rev: code.rev, dirty: code.dirty,
       version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
       ...(draining ? { draining: true } : {}),   // a drain stepdown is in progress (issue 43)
+      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch) } : {}),
     });
   });
 

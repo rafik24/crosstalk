@@ -88,8 +88,24 @@ cd "$REPO" && npm ci      # ONLY if this node may host the bus; skip for connect
 
 ## 3. Create the connection config — `~/.claude/.crosstalk`
 
-This file is **git-ignored on purpose** — the token never goes into version control. (The legacy
-`~/.claude/.cross-claude-bus` is still read for back-compat if the new name is absent.)
+**The easy way (3.3.5+): the estate password.** Start a session with the plugin installed; the
+hook prints the command. Or run it directly:
+
+```sh
+node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
+# Estate password: ▮          (hidden; asks whoever set the estate up)
+# verifying against the estate… ok — leader raf-ms-7e59 (epoch 108) proved it
+# enrolled: ~/.claude/.crosstalk
+```
+
+The keys are derived from the password (never stored) and verified against a leader that proves
+it holds them, so a typo cannot half-enrol the box. First box of a brand-new estate (no leader
+yet): `cc-enrol --no-verify`. Switching an old raw-token estate to a password: on one enrolled box
+`cc-enrol --set-password`, restart its supervisor, then enrol the others by password.
+
+**The manual way** — this file is **git-ignored on purpose** — the token never goes into version
+control. (The legacy `~/.claude/.cross-claude-bus` is still read for back-compat if the new name
+is absent.)
 
 ```sh
 # ~/.claude/.crosstalk
@@ -259,7 +275,8 @@ Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load 
 | `⛔ COULD NOT CONNECT` | no leader reachable | is a host running `cc-bus start`? is Tailscale up? try a temporary `CC_BASE=http://<leader-ip>:8787` pin |
 | `curl http://<ip>:8787/cc/whoami` times out | not on the leader's LAN and Tailscale down/logged-out | `tailscale up`; confirm both nodes online in `tailscale status` |
 | Connected but never woken for messages | reply landed in your **own** dm channel with no `@mention` | peers must DM `dm-<your-shortname>` or `@mention` you |
-| `401/403` on register | wrong `CC_TOKEN` | re-copy the token from an enrolled machine |
+| `401/403` on register | wrong `CC_TOKEN` | re-enrol by password (`cc-enrol`), or re-copy the token from an enrolled machine |
+| `[discovery] ⚠️  IGNORING unproven leader …` | this box's token differs from the leader's (or the leader predates 3.3.5) | re-enrol by password; during a 3.3.5 rollout set `CC_DISCOVERY_PROOF=legacy` for that sitting only |
 | Node reboots and bus doesn't come back (host) | no supervisor auto-start | `CC_AUTO_SUPERVISOR=1` in `~/.claude/.crosstalk`, then start one Claude session (see "Keeping a host alive") |
 | Plugin installed, sessions print a "not enrolled" line | no `~/.claude/.crosstalk` | create it per §3 — the file is the per-machine opt-in |
 

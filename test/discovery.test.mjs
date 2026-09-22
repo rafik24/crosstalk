@@ -149,12 +149,17 @@ try {
   {
     const http = await import('node:http');
     const { startBeacon } = await import('../src/cc-beacon.mjs');
+    // The stranger holds the estate token here (it signs its answers — 3.3.5 discovery ignores
+    // an UNSIGNED one regardless of mode, see proof.test): this test is about the peers-mode
+    // confinement, so the stranger must be one that strict discovery would otherwise adopt.
+    const { whoamiProof } = await import('../src/cc-proof.mjs');
     const stranger = http.createServer((req, res) => {
+      const n = new URL(req.url, 'http://x').searchParams.get('nonce');
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ role: 'leader', host: 'stranger', epoch: 99, watermark: 0 }));
+      res.end(JSON.stringify({ role: 'leader', host: 'stranger', epoch: 99, watermark: 0, ...(n ? { proof: whoamiProof('tt', n, 'stranger', 99) } : {}) }));
     });
     await new Promise((r) => stranger.listen(8794, '0.0.0.0', r));
-    const stopBeacon = startBeacon({ host: 'stranger', epoch: 99, port: 8794, beaconPort: 8899, announceMs: 60000 });
+    const stopBeacon = startBeacon({ host: 'stranger', epoch: 99, port: 8794, beaconPort: 8899, announceMs: 60000, token: 'tt' });
     try {
       await new Promise((r) => setTimeout(r, 300));
       delete process.env.CC_DISCOVERY;
