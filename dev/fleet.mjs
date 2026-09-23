@@ -362,16 +362,23 @@ export class Fleet {
   }
   headers(version = this.pkgVersion()) { return { Authorization: 'Bearer ' + this.token, 'content-type': 'application/json', 'x-cc-version': version }; }
 
+  // A freshly promoted leader is read-only for a second or two until its supervisor confirms the
+  // term (503 reason:"electing", issue 48). Real senders ride that out (src/cc-retry.mjs), so the
+  // harness does too — bounded, and ONLY for electing: a drain's 503 stays the caller's to see.
   async send(channel, content, { sender = 'fleet-harness', type = 'message' } = {}) {
-    const l = await this.leader();
-    if (!l) throw new Error('no single leader to send to');
-    const r = await fetch(this.baseUrl(l.i) + '/api/messages', {
-      method: 'POST', headers: this.headers(l.version),
-      body: JSON.stringify({ channel, sender, content, message_type: type }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(`send failed ${r.status}: ${JSON.stringify(j)}`);
-    return j;
+    const end = Date.now() + 15000;
+    for (;;) {
+      const l = await this.leader();
+      if (!l) throw new Error('no single leader to send to');
+      const r = await fetch(this.baseUrl(l.i) + '/api/messages', {
+        method: 'POST', headers: this.headers(l.version),
+        body: JSON.stringify({ channel, sender, content, message_type: type }),
+      });
+      const j = await r.json();
+      if (r.status === 503 && j.reason === 'electing' && Date.now() < end) { await sleep(500); continue; }
+      if (!r.ok) throw new Error(`send failed ${r.status}: ${JSON.stringify(j)}`);
+      return j;
+    }
   }
 
   async messages(channel, limit = 50) {

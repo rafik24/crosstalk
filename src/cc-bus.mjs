@@ -202,8 +202,8 @@ function spawnLeader(epoch, port, token, { electing = false } = {}) {
       MCP_API_KEY: token || process.env.MCP_API_KEY || '',
       CC_EPOCH: String(epoch),
       CC_HOST: HOST,
-      CC_HOST_ID: HOST_ID,
-      CC_ELECTING: electing ? '1' : '',   // start read-only until POST /cc/open (issue 48); '' = open at once   // advertised in whoami: peers tell this box from a same-slug one (issue 49)
+      CC_HOST_ID: HOST_ID,   // advertised in whoami: peers tell this box from a same-slug one (issue 49)
+      CC_ELECTING: electing ? '1' : '',   // start read-only until POST /cc/open (issue 48); '' = open at once
       CC_DATA_DIR: DATA_DIR,
       // Pass the admin key through explicitly so the server honours it even when it came from the
       // config FILE (loadConfig) rather than the ambient env — otherwise /cc/export etc. stay
