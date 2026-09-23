@@ -3,7 +3,7 @@
   "info": {
     "title": "Crosstalk",
     "version": "3.0.0",
-    "description": "REST API for the Crosstalk coordination bus: presence, channels, messages, shared data, and the work board. All /api routes require the bus bearer token (Authorization: Bearer <key> or ?api_key=<key>)."
+    "description": "REST API for the Crosstalk coordination bus: presence, channels, messages, shared data, and the work board. All /api routes require the bus bearer token (Authorization: Bearer <key> or ?api_key=<key>). While the leader is draining for a stepdown (see /cc/stepdown?drain=1) every non-GET /api request is refused with 503 {reason:\"draining\"} + Retry-After; reads keep working."
   },
   "servers": [{ "url": "/api" }],
   "security": [{ "bearerAuth": [] }, { "apiKeyQuery": [] }],
@@ -12,7 +12,8 @@
     { "name": "channels" },
     { "name": "messages" },
     { "name": "data" },
-    { "name": "work" }
+    { "name": "work" },
+    { "name": "control-plane", "description": "Leader discovery, stepdown and replication — served at the root (/cc/*), not under /api, and not bearer-token routes." }
   ],
   "paths": {
     "/register": {
@@ -50,7 +51,8 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -134,7 +136,8 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -209,7 +212,8 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -362,7 +366,8 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -460,7 +465,8 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -536,7 +542,8 @@
                 }
               }
             }
-          }
+          },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -572,7 +579,8 @@
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Draining" }
         }
       }
     },
@@ -616,7 +624,95 @@
             }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Draining" }
+        }
+      }
+    },
+    "/cc/whoami": {
+      "servers": [{ "url": "/" }],
+      "get": {
+        "tags": ["control-plane"],
+        "summary": "Discovery beacon: who leads, where, and whether it is draining (public — never carries the token)",
+        "security": [],
+        "parameters": [
+          { "name": "nonce", "in": "query", "required": false, "description": "16–64 hex chars. When given (and the bus has a token), the answer carries `proof`, an HMAC over the nonce and this leader's identity keyed by the estate token — how a client tells the real leader from a forger.", "schema": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "This node leads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "role": { "type": "string", "enum": ["leader"] },
+                    "host": { "type": "string" },
+                    "epoch": { "type": "integer" },
+                    "base": { "type": "string" },
+                    "watermark": { "type": "integer", "description": "Highest message id served — the freshness tiebreak for election." },
+                    "rev": { "type": "string" },
+                    "dirty": { "type": "boolean" },
+                    "version": { "type": "string" },
+                    "draining": { "type": "boolean", "enum": [true], "description": "Present (and true) ONLY while a drain stepdown is in progress: the leader is read-only (writes get 503 draining) and leaves as soon as a replica holds its final snapshot. Absent otherwise. A replica that sees it pulls at once and stands by to take the term." },
+                    "proof": { "type": "string", "description": "Only when `nonce` was sent and the bus has a token." }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cc/stepdown": {
+      "servers": [{ "url": "/" }],
+      "post": {
+        "tags": ["control-plane"],
+        "summary": "Ask the leader to step down — plain, or loss-free with ?drain=1",
+        "description": "Admin: with CC_ADMIN_KEY set, `Authorization: Bearer <admin key>` (or `?admin_key=`); without one, loopback callers only.\n\nPLAIN (no `drain`): the leader leaves at once (writes the .stepdown marker, closes, exits). Used by migrate and by an outranked leader.\n\n`?drain=1` (SQLite backend only): the leader goes READ-ONLY — every non-GET /api request gets `503 {reason:\"draining\"}` + `Retry-After` — and `whoami` reports `draining: true`. It leaves as soon as a replica pulls a FINAL snapshot (a GET /cc/export taken while draining with no write in flight), or at the deadline (CC_DRAIN_MS, default 20000 ms) if none does. If no replica has pulled within the last 40 s there is nobody to drain for, and the request degrades to a PLAIN stepdown (`draining: false`). A PLAIN stepdown that arrives during a drain ends the drain now (`ended_drain: true`); a second `?drain=1` during a drain is a no-op (`draining: true`).",
+        "security": [],
+        "parameters": [
+          { "name": "drain", "in": "query", "required": false, "description": "`1` = the loss-free drain form. Any other value (or none) = plain.", "schema": { "type": "string", "enum": ["1"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "draining": { "type": "boolean", "description": "true = a drain is (now) in progress; false = plain stepdown, the leader is leaving now." },
+                    "deadline_ms": { "type": "integer", "description": "Only on the request that STARTED a drain." },
+                    "ended_drain": { "type": "boolean", "description": "Only when a plain stepdown cut an in-progress drain short." }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "CC_ADMIN_KEY is set and the admin key was wrong or missing" },
+          "403": { "description": "No CC_ADMIN_KEY and the caller is not on loopback" }
+        }
+      }
+    },
+    "/cc/export": {
+      "servers": [{ "url": "/" }],
+      "get": {
+        "tags": ["control-plane"],
+        "summary": "Fresh SQLite snapshot for replication/migration (admin, as /cc/stepdown)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The snapshot. While the leader is draining the response carries `x-cc-draining: 1` — the replica's cue that the leader is leaving and must be followed closely; a snapshot taken while draining with no write in flight is FINAL and releases the drain.",
+            "headers": {
+              "x-cc-draining": { "description": "`1` only while a drain stepdown is in progress; absent otherwise.", "schema": { "type": "string", "enum": ["1"] } }
+            },
+            "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } }
+          },
+          "401": { "description": "CC_ADMIN_KEY is set and the admin key was wrong or missing" },
+          "403": { "description": "No CC_ADMIN_KEY and the caller is not on loopback" },
+          "501": { "description": "Not the SQLite backend (no local file to snapshot)" }
         }
       }
     }
@@ -637,6 +733,23 @@
         "description": "Referenced id or key not found",
         "content": {
           "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+        }
+      },
+      "Draining": {
+        "description": "The leader is in a drain stepdown (POST /cc/stepdown?drain=1) and is read-only: EVERY non-GET /api request is refused, before the handler runs, until it leaves. Nothing was written — retry after Retry-After seconds; by then a successor normally leads (re-discover it). The bundled clients do this automatically.",
+        "headers": {
+          "Retry-After": { "description": "Seconds to wait before retrying (always 5).", "schema": { "type": "integer", "example": 5 } }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": { "type": "string", "example": "the bus leader is draining for a stepdown; retry shortly" },
+                "reason": { "type": "string", "enum": ["draining"] }
+              }
+            }
+          }
         }
       }
     },

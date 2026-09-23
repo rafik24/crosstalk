@@ -16,6 +16,12 @@
 //       same pid, still alive after the old kill window
 //   H3  CLIENT case: old client + `ensure` from the NEW copy → new supervisor, still one leader
 //   H4  the hook-started supervisor leaves a log (issue 36): cc-bus.log has its role line
+//   H5  the handover DRAINS (issue 53 — these branches used to run unasserted): the helper asked
+//       for a drain, the old leader left on a replica's FINAL pull (not its 20s deadline), the
+//       respawned supervisor got the start-holdoff, and a real cc-send fired INTO the read-only
+//       window met the 503 and landed exactly once on the successor. Mutation-verified RED for
+//       each of: no `?drain=1` in cmdHandover · no CC_START_HOLDOFF_MS · no finishDrain on the
+//       final pull.
 //
 // MEASURED (Windows 11 / node 24): with the /cc/stepdown that `ensure` sends before the kill
 // REMOVED, this suite stays GREEN. Explanation, verified separately on Windows: libuv places
@@ -31,7 +37,7 @@
 // still an OLD-version non-leader (with two nodes a replica whose failover tick landed inside
 // the handover gap could take the term, and the "client" left over was the node just upgraded).
 // ---------------------------------------------------------------------------
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -41,7 +47,7 @@ for (const k of ['CC_TOKEN', 'CC_BASE', 'CC_PIN', 'CC_PEERS', 'CC_ADMIN_KEY', 'C
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const { Fleet, listeners, listenerPid, pidAlive, cleanupOnSignal } = await import(pathToFileURL(join(ROOT, 'dev', 'fleet.mjs')).href);
+const { Fleet, fileId, listeners, listenerPid, pidAlive, cleanupOnSignal } = await import(pathToFileURL(join(ROOT, 'dev', 'fleet.mjs')).href);
 
 const SLOT = parseInt(process.env.CC_FLEET_SLOT) || 10;
 const OLD_V = '9.9.1', NEW_V = '9.9.2';
@@ -88,7 +94,10 @@ for (const d of staleCopies) {
 
 try {
   const OLD = makeCopy('old', OLD_V), NEW = makeCopy('new', NEW_V);
-  const f = new Fleet({ slot: SLOT, size: 3, dir: join(SCRATCH, 'fleet'), srcRoots: { 0: OLD, 1: OLD, 2: OLD } });
+  // The DEFAULT cadence (30s pulls, 15s checks — what the live fleet runs, as replication.test R6):
+  // the drain then stays open until a replica's failover check notices it, which leaves H5 a window
+  // a real sender can be fired into. At a 2s cadence it closes before a spawned sender can start.
+  const f = new Fleet({ slot: SLOT, size: 3, dir: join(SCRATCH, 'fleet'), srcRoots: { 0: OLD, 1: OLD, 2: OLD }, replicateMs: 30000 });
   fleets.push(f);
   // ensure's DETACHED supervisor is not the harness's child: adopt it so nodes[i] tracks it
   // (down() adopts too, so an exception or a signal before this line still cannot orphan it).
@@ -96,6 +105,8 @@ try {
 
   const l0 = await f.up();
   ok(l0.i === 0 && l0.version === OLD_V, `fleet up on the OLD install: node0 leads, serving version ${l0.version}`);
+  // A leader only drains for a replica that has pulled recently — otherwise it just steps down.
+  ok(await f.waitFor(() => !!fileId(f.replicaPath(1)) || !!fileId(f.replicaPath(2)), 40000, 100), 'a replica holds its first snapshot (so the handover has someone to drain for)');
   const m = await f.send('handover', 'written under the old version');
 
   // --- H1 ---------------------------------------------------------------------------------------
@@ -104,6 +115,19 @@ try {
   ok(oldSrv > 0 && oldSrv !== oldSup && pidAlive(oldSrv), `pre: old supervisor pid ${oldSup}, old server pid ${oldSrv}`);
   const out1 = ensure(NEW, f.nodeEnv(0));
   ok(/version handover/.test(out1) && out1.includes(OLD_V) && out1.includes(NEW_V), `ensure announced the handover (${out1.trim().split('\n')[0]})`);
+  // H5 (part): ensure returns at once and its detached helper drains the old leader. Catch the
+  // read-only window and fire a REAL one-shot sender into it, exactly as replication.test R7 does
+  // (the OLD copy's cc-send: every node that can take the term runs the old version).
+  const drainSeen = await f.waitFor(async () => (await f.whoami(0))?.draining === true, 20000, 50);
+  ok(!!drainSeen, 'H5 the old leader went into a DRAIN (whoami.draining) — the helper asked for ?drain=1');
+  let sendOut = '', sendErr = '', sendExit = Promise.resolve(null);
+  if (drainSeen) {
+    const send = spawn(process.execPath, [join(OLD, 'src', 'cc-send.mjs'), 'node1/sender', 'handover', 'H5 rode the drain'], {
+      env: { ...f.nodeEnv(1), HOME: join(SCRATCH, 'home-h5'), USERPROFILE: join(SCRATCH, 'home-h5') }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    send.stdout.on('data', (d) => { sendOut += d; }); send.stderr.on('data', (d) => { sendErr += d; });
+    sendExit = new Promise((res) => send.on('exit', (code) => res(code)));
+  }
   const sup1 = await f.waitFor(() => { const s = f.supervisor(0); return s && s.version === NEW_V && s.pid !== oldSup && pidAlive(s.pid) && s.role !== 'starting' ? s : null; }, 60000, 250);
   ok(!!sup1, `a NEW-version supervisor owns node0 (pid ${sup1?.pid}, v${sup1?.version}, ${sup1?.role})`);
   adopt(0);
@@ -111,6 +135,20 @@ try {
   const l1 = await f.waitSingleLeader({ timeoutMs: 60000, minEpoch: 2, stableMs: 8000 });
   ok(!!l1, `exactly one leader after the handover, stable 8s (${l1 ? `node${l1.i}@${l1.epoch} v${l1.version}` : 'none / split'})`);
   ok((await f.messages('handover')).some((x) => x.id === m.id), `message id ${m.id} survived the handover`);
+  {
+    const code = await sendExit;
+    ok(code === 0 && /sent →/.test(sendOut), `H5 cc-send exited 0 (${(sendOut || sendErr).trim().split('\n').pop()})`);
+    ok(/handing over \(draining\)/.test(sendErr), 'H5 it met the 503 draining and waited (not a lucky send before/after the window)');
+    ok((await f.messages('handover')).filter((x) => /H5 rode the drain/.test(x.content)).length === 1, 'H5 the message sent into the drain is on the successor exactly once');
+    // The old server wrote to node0's fleet log (the fleet started that supervisor); the helper
+    // and the supervisor it respawned write cc-bus.log.
+    ok(/a replica pulled the final snapshot/.test(f.log(0)) && !/deadline reached/.test(f.log(0)), "H5 the old leader left on a replica's FINAL pull, not on its 20s drain deadline");
+    let busLog = ''; try { busLog = readFileSync(join(f.dataDir(0), 'cc-bus.log'), 'utf8'); } catch {}
+    ok(/handover: asking the local leader \(epoch \d+\) to DRAIN/.test(busLog), 'H5 the helper asked the local leader to DRAIN');
+    ok(!/STILL up after the drain window/.test(busLog), "H5 the old server left inside the helper's wait (no forced kill)");
+    const hold = busLog.match(/started after a drained handover[^\n]*/);
+    ok(!!hold, `H5 the respawned supervisor got the start-holdoff (${hold ? hold[0] : 'no holdoff line in cc-bus.log'})`);
+  }
   ok(listeners(f.port(0)).every((l) => l.addr === '127.0.0.1'), 'the respawned server is still loopback-only');
 
   // --- H4 ---------------------------------------------------------------------------------------

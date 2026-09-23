@@ -529,6 +529,9 @@ async function cmdStart() {
   async function electAndRun() {
     const leader = await resolveFull({ token });   // any live bus, incl. this box's loopback
     if (!leader && startHoldoffMs) { const h = startHoldoffMs; startHoldoffMs = 0; log(`started after a drained handover → holding off elections for ${Math.round(h / 1000)}s`); return runClient({ holdoffMs: h }); }
+    // (The replica usually wins that race and already leads: say so, so the log always shows the
+    // handover's holdoff arrived — handover.test asserts one of these two lines, issue 53.)
+    if (leader && startHoldoffMs) log(`started after a drained handover → ${leader.host} already leads, joining it (no holdoff needed)`);
     startHoldoffMs = 0;
     if (leader) {
       cacheLeader(leader);
