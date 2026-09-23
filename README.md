@@ -178,9 +178,21 @@ Authority is a monotonic **epoch** persisted in `~/.crosstalk/epoch` next to the
 and **carried with the DB on migration**. `GET /cc/whoami` (unauthenticated — advertises
 host/epoch/base plus a data **watermark** and the running code **rev**, never a secret) is the
 beacon. Discovery merges every responder and picks the winner by the single `outranks()`
-ordering: **highest epoch**, then — at an equal epoch — the **highest watermark** (the freshest
-snapshot), then the lexicographically-lowest host. A migrated host starts at `epoch+1`, so it
-wins over any stale server; a supervisor that sees a peer outrank it steps down.
+ordering: **highest epoch**, then — at an equal epoch — an **open** term over one still
+**electing** (see *A new term opens only when it is confirmed* below), then the **highest
+watermark** (the freshest snapshot), then the lexicographically-lowest host, then the lowest
+**host id**. A migrated host starts at `epoch+1`, so it wins over any stale server; a supervisor
+that sees a peer outrank it steps down.
+
+**Host name vs host id (3.3.5, issue 49).** A host's *name* is its canonical slug (lowercase,
+`[a-z0-9-]`) — what logs, the console and DM routing show. Different machines can slug alike
+(`box_1` / `box-1`, every all-non-ASCII hostname → `unknown-host`), so "is that this machine?" —
+the same-host replication guard, "a server is already running here", the supervisor presence id
+(`cc-bus-supervisor/<slug>-h<id>`) and the final tie-break — is decided on a **host id**: 8 hex of
+a SHA-256 of the raw, case-folded hostname (casing alone never splits one box). It is advertised as
+`host_id` in `/cc/whoami` and signed in its proof. A peer without one (pre-3.3.5) is compared by
+slug, as before; a peer that shares our slug but not our id is treated as a different machine and
+logged loudly once — rename one of them. Byte-identical hostnames on two machines still collide.
 
 The **watermark** is the highest message id the leader has served (tracked in memory, so
 `/cc/whoami` never hits the DB). It makes an equal-epoch election pick the branch that took the
@@ -207,19 +219,39 @@ interval and anything under 15s was silently ignored), while failure *detection*
 than 5s. At the default nothing changes: 15s checks, 30s pulls. Every pull is a full `VACUUM INTO`
 image of the DB — a very short interval on a large bus is real load on the leader.
 
+**A new term opens only when it is confirmed (3.3.5, issue 48).** Every promotion starts the
+server **read-only** — writes get a retryable `503 {reason:"electing"}` + `Retry-After: 2`, and
+`/cc/whoami` says `electing: true` — until its supervisor has scanned *after* its own server was
+listening and found no peer that outranks it; then it opens the term (`POST /cc/open`, admin).
+Two supervisors that promote together (a power cut, a fleet-wide upgrade, two laptops opened at
+once, a raced failover) therefore cannot both acknowledge writes: whichever scans second sees the
+other, the ordering picks one, and the loser steps down having acknowledged nothing. An open term
+is never overturned by an equal-epoch rival still electing. Before, every node of a simultaneous
+cold start led for several seconds and the losers' acknowledged writes were dropped. On top of
+that, a supervisor that finds no bus at start-up looks again after a stable per-host delay in
+`[0, CC_COLD_START_JITTER_MS)` (default 2000; `0` = off) so that usually only one node promotes at
+all. Measured on the one-box fleet (Windows, node 24): 2–3 simultaneous starters → first write
+acknowledged after ~1.5–3.4s (was ~1.1–1.7s, with 11–24 of those writes later lost), a single
+stable leader after ~1.4–4.0s (was ~5.7–6.1s). Senders ride the window out exactly like a drain.
+
 **A graceful stepdown loses nothing — drain.** `POST /cc/stepdown?drain=1` (admin) flips the
 leader **read-only** (writes get a retryable `503 {reason:"draining"}` + `Retry-After`, never a
 200 for a message about to vanish), and it exits as soon as a replica has pulled a snapshot taken
 after the last write finished — or at `CC_DRAIN_MS` (default 20s) if none shows up; with no
 replica pulling recently it degrades to the plain form at once. A replica that sees
-`x-cc-draining` follows the leader closely and takes the term the moment it is gone (~5s instead
-of a full tick), and the node that stepped down may join but not elect for one tick, so it cannot
+`x-cc-draining` follows the leader closely; the ONE replica whose pull released the leader (its
+export carried `x-cc-released: 1` — only the first final pull gets it) takes the term the moment the
+leader is gone (~5s instead of a full tick), while every other replica holds off ~5–8s (a stable
+per-host spread) and then finds it leading — two replicas no longer promote into the same epoch
+together (issue 52). The node that stepped down may join but not elect for one tick, so it cannot
 snatch the term back (a lone ex-leader therefore takes ~35–40s, not ~15s, to lead again). The plain
 `POST /cc/stepdown` keeps its exact semantics — `migrate` (the target already imported the DB) and
 the outranked-leader monitor never wait.
 
 Who drains: the **version handover** (`cc-bus ensure` finding a supervisor from a superseded
-install) now runs as a detached helper that asks the old leader to *drain*, waits for it to leave,
+install — "superseded" is SemVer precedence, so a final `3.3.4` replaces a running `3.3.4-rc1`,
+never the reverse; before 3.3.5 the prerelease suffix was ignored and an `-rc` leader was never
+handed over, issue 49) now runs as a detached helper that asks the old leader to *drain*, waits for it to leave,
 then replaces its supervisor (which, after a real drain, holds off elections like the ex-leader it
 replaces, so it cannot tie with the replica taking the term); and any operator
 `curl -X POST …/cc/stepdown?drain=1`. It is the OLD server that drains, so this pays off from the
@@ -227,8 +259,10 @@ upgrade AFTER 3.3.4: a 3.3.3 leader ignores `?drain=1` and the 3.3.3 → 3.3.4 r
 steps down the old way. On a single-box estate there is no replica to drain for — the stepdown is
 immediate, and loss-free anyway because the new supervisor re-opens the same `messages.db`. Senders ride it out: `cc-send`, `cc-ack`, `cc-work`,
 `cc-codex` and the shared client treat `503 draining` as "wait `Retry-After`, re-discover, re-send"
-(`src/cc-retry.mjs`), so a message issued during a handover lands on the new leader instead of
-failing. Limits, stated: with two or more REMOTE replicas a drain lines their elections up, so both may promote at the same epoch for up to one monitor tick (~5s) before the tie-break demotes one — a write accepted by the loser in that window is lost (issue 52); during a rollout a replica still on 3.3.3 does not follow a drain (it
+(`src/cc-retry.mjs`; `503 electing` too), so a message issued during a handover lands on the new
+leader instead of failing. Limits, stated: a pre-3.3.5 leader sends no `x-cc-released`, so on the
+3.3.4 → 3.3.5 handover every replica takes the spread (still one promotion in the common case, and
+the electing gate settles any tie before a write is acknowledged); during a rollout a replica still on 3.3.3 does not follow a drain (it
 pulls on its own 30s cadence), so the 20s deadline can fire first and the old loss bound applies
 until that box upgrades too; and any admin `/cc/export` taken during a drain counts as the final
 pull.
@@ -305,6 +339,9 @@ Each machine reads `~/.claude/.crosstalk` (or the legacy `~/.claude/.cross-claud
 - `CC_BIND` — interface the hosted server binds (default `127.0.0.1`). An **empty** value means
   the default; before 3.3.4 an exported-empty `CC_BIND=` bound every interface.
 - `CC_DRAIN_MS` (default 20000) — deadline of a drain stepdown (see **Failover keeps the messages**).
+- `CC_COLD_START_JITTER_MS` (default 2000, `0` = off) — a supervisor that finds no bus at start-up
+  looks again after a stable per-host delay below this before electing (see **A new term opens only
+  when it is confirmed**).
 
 Opt-in per machine (the join hook no-ops if the file is absent) and **git-ignored** — the
 token never belongs in version control. Firewall: allow inbound **TCP 8787** + **UDP 8788**
@@ -320,7 +357,8 @@ below raises the floor; it does not make the bus safe to expose to the open inte
   follows the highest advertised epoch — so before 3.3.5 *any* host answering `{epoch: 1e15}` was
   adopted as leader and then received every client's bearer token. Now a client sends a fresh
   nonce and only trusts a responder whose `proof` is `HMAC-SHA256(CC_TOKEN, nonce|host|epoch|watermark|
-  <the server's own socket address:port>)` — checked against the address the client actually reached,
+  <the server's own socket address:port>[|id=<host_id>][|electing])` — the two optional fields are
+  signed when present because the election orders on them — checked against the address the client actually reached,
   so a LAN relay that forwards the challenge to the real leader fails at its own address;
   beacon announces carry `ts` + `HMAC(CC_TOKEN, host|epoch|port|ts)` and are dropped when unsigned
   or older than 60 s (a stale one is logged once with the measured skew). Nothing derived from the
