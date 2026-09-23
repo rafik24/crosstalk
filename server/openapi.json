@@ -640,13 +640,14 @@
         ],
         "responses": {
           "200": {
-            "description": "This node leads",
+            "description": "This node leads (`role: \"leader\"`, all fields below). A `cc-bus receive` migrate STANDBY answers too, with `role: \"standby\"` and only host, epoch, port and (with a nonce) proof — it serves no bus.",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "role": { "type": "string", "enum": ["leader"] },
+                    "role": { "type": "string", "enum": ["leader", "standby"] },
+                    "port": { "type": "integer", "description": "standby only" },
                     "host": { "type": "string" },
                     "epoch": { "type": "integer" },
                     "base": { "type": "string" },
@@ -669,7 +670,7 @@
       "post": {
         "tags": ["control-plane"],
         "summary": "Ask the leader to step down — plain, or loss-free with ?drain=1",
-        "description": "Admin: with CC_ADMIN_KEY set, `Authorization: Bearer <admin key>` (or `?admin_key=`); without one, loopback callers only.\n\nPLAIN (no `drain`): the leader leaves at once (writes the .stepdown marker, closes, exits). Used by migrate and by an outranked leader.\n\n`?drain=1` (SQLite backend only): the leader goes READ-ONLY — every non-GET /api request gets `503 {reason:\"draining\"}` + `Retry-After` — and `whoami` reports `draining: true`. It leaves as soon as a replica pulls a FINAL snapshot (a GET /cc/export taken while draining with no write in flight), or at the deadline (CC_DRAIN_MS, default 20000 ms) if none does. If no replica has pulled within the last 40 s there is nobody to drain for, and the request degrades to a PLAIN stepdown (`draining: false`). A PLAIN stepdown that arrives during a drain ends the drain now (`ended_drain: true`); a second `?drain=1` during a drain is a no-op (`draining: true`).",
+        "description": "Admin: with CC_ADMIN_KEY set, `Authorization: Bearer <admin key>` (or `?admin_key=`); without one, loopback callers only.\n\nPLAIN (no `drain`): the leader leaves at once — writes the .stepdown marker and closes; the process then exits only when the server runs with exitOnStepdown (always for `node server/server.mjs`, the entry the supervisor starts; an embedder opts in with CC_STEPDOWN_EXIT=1). Used by migrate and by an outranked leader.\n\n`?drain=1` (SQLite backend only): the leader goes READ-ONLY — every non-GET /api request gets `503 {reason:\"draining\"}` + `Retry-After` — and `whoami` reports `draining: true`. It leaves as soon as a replica pulls a FINAL snapshot (a GET /cc/export taken while draining with no write in flight), or at the deadline (CC_DRAIN_MS, default 20000 ms) if none does. If no replica has pulled within the last 40 s there is nobody to drain for, and the request degrades to a PLAIN stepdown (`draining: false`). A PLAIN stepdown that arrives during a drain ends the drain now (`ended_drain: true`). A second `?drain=1` during a drain is a no-op (`draining: true`) only while a replica has pulled within the last 40 s; otherwise it takes the plain branch and ends the drain too (`draining: false, ended_drain: true`).",
         "security": [],
         "parameters": [
           { "name": "drain", "in": "query", "required": false, "description": "`1` = the loss-free drain form. Any other value (or none) = plain.", "schema": { "type": "string", "enum": ["1"] } }
@@ -736,7 +737,7 @@
         }
       },
       "Draining": {
-        "description": "The leader is in a drain stepdown (POST /cc/stepdown?drain=1) and is read-only: EVERY non-GET /api request is refused, before the handler runs, until it leaves. Nothing was written — retry after Retry-After seconds; by then a successor normally leads (re-discover it). The bundled clients do this automatically.",
+        "description": "The leader is in a drain stepdown (POST /cc/stepdown?drain=1) and is read-only: EVERY non-GET /api request is refused, before the handler runs, until it leaves. The drain check runs AFTER authentication and the version gate, so a bad token still gets 401 and a version mismatch 426 first. Nothing was written — retry after Retry-After seconds; by then a successor normally leads (re-discover it). The bundled clients do this automatically.",
         "headers": {
           "Retry-After": { "description": "Seconds to wait before retrying (always 5).", "schema": { "type": "integer", "example": 5 } }
         },

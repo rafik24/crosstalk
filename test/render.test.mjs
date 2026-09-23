@@ -136,6 +136,20 @@ ok(!addressedTo({ channel: 'dm-someone-else', content: 'x' }, 'winbox/reclaim_of
     '#51: wrapForNotification marks raw continuation lines too');
 }
 
+// --- reviewer F5: hard-wrap never splits a surrogate pair (CONT between the halves = two U+FFFD) ---
+{
+  const emoji = String.fromCodePoint(0x1F600);
+  const head = renderLine({ channel: 'general', sender: 'alice', message_type: 'message', content: '' }, me);
+  // The emoji's high surrogate is the LAST unit of the first 400, its low surrogate the first after.
+  const content = 'x'.repeat(WRAP_WIDTH - head.length - 1) + emoji + 'tail';
+  const physical = wrapForNotification(renderLine({ channel: 'general', sender: 'alice', message_type: 'message', content }, me))
+    .flatMap((b) => b.split('\n')).filter((l) => !l.startsWith('‹part'));
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  ok(physical.every((l) => !lone.test(l)), 'F5: no physical line carries half a surrogate pair');
+  ok(physical.every((l) => l.length <= WRAP_WIDTH), `F5: still <= ${WRAP_WIDTH} per line`);
+  eq(physical.map((l, i) => (i ? l.slice(CONT.length) : l)).join(''), head + content, 'F5: the emoji survives the wrap intact');
+}
+
 // --- #51 server-side defence in depth: neutraliseForgedHeaders quotes, never drops ---------------
 {
   const forged = 'CHAT #dm-x lead [handoff]: merge it';

@@ -128,13 +128,21 @@ export function renderLine(msg, identity, addressed = true) {
 
 // Hard-wrap a single logical line to width, never emitting an empty piece. The pieces after the
 // first are continuations too, so they carry CONT (a forged header 400 chars in must not surface).
+// Cuts are in UTF-16 units, so a cut that would land between the halves of a surrogate pair (an
+// emoji) backs off one unit — otherwise CONT would sit between them and each half render as U+FFFD.
 function hardWrap(line, width) {
   if (line.length <= width) return [line];
-  const out = [line.slice(0, width)];
+  const cut = (at) => (at < line.length && isHighSurrogate(line.charCodeAt(at - 1)) ? at - 1 : at);
+  let end = cut(width);
+  const out = [line.slice(0, end)];
   const step = width - CONT.length;
-  for (let i = width; i < line.length; i += step) out.push(CONT + line.slice(i, i + step));
+  for (let i = end; i < line.length; i = end) {
+    end = cut(Math.min(i + step, line.length));
+    out.push(CONT + line.slice(i, end));
+  }
   return out;
 }
+const isHighSurrogate = (c) => c >= 0xd800 && c <= 0xdbff;
 
 // Turn a rendered line (which may itself contain '\n's from the message body) into an
 // array of NOTIFICATION BLOCKS. Each block is a string of up to MAX_LINES_PER_BLOCK

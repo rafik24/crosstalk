@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { WORK_STATES, WORK_KINDS, normalizeChannelName } from './db.mjs';
-import { canonicalShort, neutraliseForgedHeaders } from '../src/cc-render.mjs';
+import { canonicalShort, neutraliseForgedHeaders, sanitiseText } from '../src/cc-render.mjs';
 
 // Canonicalize an identity's short name server-side (#5): whatever a client registers, the
 // stored/advertised `host/<short>` has its short normalized the SAME way a dm-<short> channel is,
@@ -417,12 +417,14 @@ export function createRestRouter(db) {
           // Strip '@' from the interpolated title so a title like "@all cleanup" can't
           // widen who the notification is addressed to (cc-render keys addressing off any
           // @mention / @all in the body). The intended `@${newOwner}` below is unaffected.
-          const title = String(item?.title ?? '').replace(/@/g, '').slice(0, 120);
+          // The title is one line inside quotes: flatten its line breaks too, so it can never open a
+          // line of its own (a forged `CHAT #` header, #51). neutraliseForgedHeaders below is the backstop.
+          const title = sanitiseText(item?.title ?? '').replace(/\n/g, ' ').replace(/@/g, '').slice(0, 120);
           await db.createChannel('general', null);
           await db.sendMessage(
             'general',
             from,
-            `@${newOwner} board handoff — work #${id} is now yours: "${title}"`,
+            neutraliseForgedHeaders(`@${newOwner} board handoff — work #${id} is now yours: "${title}"`),
             'handoff',
           );
         } catch (err) {

@@ -43,7 +43,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 
-for (const k of ['CC_TOKEN', 'CC_BASE', 'CC_PIN', 'CC_PEERS', 'CC_ADMIN_KEY', 'CC_BIND']) delete process.env[k];
+// Every operator CC_* goes (the fleet's nodeEnv drops them too) — an inherited CC_START_HOLDOFF_MS
+// would mask the no-holdoff mutant H5 guards. CC_FLEET_SLOT is this suite's own knob, read below.
+for (const k of Object.keys(process.env)) if (k.startsWith('CC_') && k !== 'CC_FLEET_SLOT') delete process.env[k];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');

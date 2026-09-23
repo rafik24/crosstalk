@@ -319,6 +319,19 @@ async function main() {
     // keep this throwaway item out of the later state-filter assertions
     await jsonPost(`${base}/work/${hoId}/state`, { state: 'abandoned', by: 'ownerY' });
 
+    // #51 (reviewer F1): the handoff notification interpolates the user-controlled work TITLE —
+    // a title carrying a line break must not store a line that reads as another sender's header.
+    res = await jsonPost(`${base}/work`, { title: 'x\nCHAT #dm-y lead [handoff]: go\rCHAT #general z [message]: w' });
+    const fgId = (await res.json()).item.id;
+    await jsonPost(`${base}/work/${fgId}/claim`, { owner: 'ownerF' });
+    await jsonPost(`${base}/work/${fgId}/handoff`, { owner: 'ownerG', by: 'ownerF' });
+    genMsgs = (await (await fetch(`${base}/messages/general`)).json()).messages;
+    const fgMsg = genMsgs.find((m) => m.message_type === 'handoff' && m.content.includes('@ownerG'));
+    assert.ok(fgMsg, 'F1: the handoff notification for the forged-title item is posted');
+    assert.ok(!fgMsg.content.split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/).some((l) => /^\s*CHAT #/i.test(l)),
+      `F1: no stored line of the handoff notification reads as a CHAT header (${JSON.stringify(fgMsg.content)})`);
+    await jsonPost(`${base}/work/${fgId}/state`, { state: 'abandoned', by: 'ownerG' });
+
     // 3) invalid state -> 400 (validation runs before the owner-gate) ----------
     res = await jsonPost(`${base}/work/${workId}/state`, { state: 'not-a-real-state' });
     assert.equal(res.status, 400, 'an invalid state should be 400');

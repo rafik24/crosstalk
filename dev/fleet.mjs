@@ -166,12 +166,13 @@ export class Fleet {
     const peers = [];
     for (let j = 0; j < this.size; j++) if (j !== i) peers.push(`127.0.0.1:${this.port(j)}`);
     const env = { ...process.env };
-    // Never inherit a pin/token/bind/epoch from the operator's shell. DELETE, don't blank: several
-    // reads treat '' as a value (CC_BIND='' → listen on every interface, issue 45).
-    for (const k of ['CC_BASE', 'CC_PIN', 'CC_ADMIN_KEY', 'CC_ALLOW_FILE_ORIGIN', 'CC_VERSION_GATE_BYPASS', 'CC_EPOCH', 'PORT',
-      'MCP_API_KEY', 'CC_AUTO_SUPERVISOR', 'CC_ALLOW_NO_AUTH', 'SERVER_URL', 'CC_WS_ALLOWED_ORIGINS', 'CC_STEPDOWN_EXIT',
-      'CLEANUP_DAYS', 'CC_MAX_IMPORT_MB', 'CC_RETRY_MS', 'CC_RETRY_MAX_ATTEMPTS', 'CC_DRAIN_MS']) delete env[k];
-    for (const k of Object.keys(env)) if (k.startsWith('CC_RL_')) delete env[k];   // operator rate-limit tuning would perturb the write tests
+    // Never inherit ANY bus setting from the operator's shell: every CC_* goes, and what a node needs
+    // is set explicitly below (extraEnv / envOverrides are the only way in). A hand-kept list drifted
+    // — CC_START_HOLDOFF_MS, CC_DISCOVERY_PROOF, CC_FORCE_BASE… leaked, and an operator's holdoff
+    // would have masked handover.test's no-holdoff mutant. DELETE, don't blank: several reads treat
+    // '' as a value (CC_BIND='' → listen on every interface, issue 45).
+    for (const k of Object.keys(env)) if (k.startsWith('CC_')) delete env[k];
+    for (const k of ['PORT', 'MCP_API_KEY', 'SERVER_URL', 'CLEANUP_DAYS']) delete env[k];
     return {
       ...env,
       ...this.extraEnv,
