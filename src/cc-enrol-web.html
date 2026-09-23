@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Crosstalk — enrol this machine</title>
+<!--
+  cc-enrol-web.html — served ONLY by cc-enrol-web.mjs on 127.0.0.1 (issue 55). Self-contained: no
+  external assets. Every request goes to a path RELATIVE to this page (/<one-time-token>/…), so the
+  token is never templated in here. The server stamps __NONCE__ into the CSP and these two tags.
+-->
+<style nonce="__NONCE__">
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #5b6270; --line: #d9dde4;
+    --accent: #2f5bd3; --accent-text: #ffffff; --ok: #1b7a3e; --ok-bg: #e8f5ed; --err: #b42318; --err-bg: #fdecea;
+    --warn: #8a5a00; --warn-bg: #fff6e0; --focus: #2f5bd3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318; --card: #1a1d24; --text: #e8eaef; --muted: #a0a7b4; --line: #2e333d;
+      --accent: #7c9cff; --accent-text: #0d1020; --ok: #6fd69a; --ok-bg: #16281d; --err: #ff9b8f; --err-bg: #2d1715;
+      --warn: #f3c969; --warn-bg: #2a2313; --focus: #7c9cff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1.5rem 1.75rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+  p { margin: .5rem 0; }
+  .muted { color: var(--muted); font-size: .92rem; }
+  .brand { color: var(--muted); font-size: .85rem; letter-spacing: .04em; text-transform: uppercase; margin-bottom: .75rem; }
+  label { display: block; font-weight: 600; margin: 1rem 0 .3rem; }
+  input[type=password], input[type=text] { width: 100%; padding: .6rem .7rem; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  .check { display: flex; gap: .5rem; align-items: flex-start; font-weight: 400; margin: .9rem 0 0; }
+  .check input { margin-top: .3rem; }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 1.25rem; }
+  button { font: inherit; font-weight: 600; padding: .6rem 1.1rem; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.link { border: none; background: none; padding: 0; color: var(--accent); font-weight: 600; text-decoration: underline; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  .tabs { display: flex; gap: .5rem; margin: 1rem 0 .25rem; }
+  .tabs button[aria-pressed=true] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .note { border-radius: 8px; padding: .75rem .9rem; margin: 1rem 0 0; }
+  .note.ok { background: var(--ok-bg); color: var(--ok); }
+  .note.err { background: var(--err-bg); color: var(--err); }
+  .note.warn { background: var(--warn-bg); color: var(--warn); }
+  .note .detail { display: block; font-size: .85rem; margin-top: .35rem; opacity: .9; }
+  .done { font-size: 1.05rem; }
+  [hidden] { display: none !important; }
+  footer { margin-top: 1rem; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div class="brand">Crosstalk</div>
+    <h1 id="title">Enrol this machine</h1>
+
+    <section id="loading" aria-busy="true">
+      <p class="muted">Looking for your estate on this network…</p>
+    </section>
+
+    <!-- Already enrolled -->
+    <section id="enrolled" hidden>
+      <p class="done">✓ This machine is enrolled as <strong data-host></strong> — every session on it joins the bus automatically.</p>
+      <p class="muted">Nothing to do here unless the estate password is changing.</p>
+      <div class="row">
+        <button type="button" data-go="set-password">Change estate password</button>
+        <button type="button" data-go="re-enrol">Re-enrol</button>
+      </div>
+      <p class="muted"><strong>Change estate password</strong> sets a new password for the whole estate from this machine — also how an estate that still uses a copied token moves to a password. <strong>Re-enrol</strong> is for when the estate password was changed on another machine.</p>
+    </section>
+
+    <!-- Not enrolled: Join / Set up switch -->
+    <div id="switch" class="tabs" role="group" aria-label="What do you want to do?" hidden>
+      <button type="button" data-tab="join" aria-pressed="false">Join your estate</button>
+      <button type="button" data-tab="setup" aria-pressed="false">Set up a new estate</button>
+    </div>
+
+    <form id="join" data-action="join" hidden novalidate>
+      <h2>Join your estate</h2>
+      <p class="muted" data-found hidden>An estate answered on this network. Enter its password — the password whoever set Crosstalk up chose.</p>
+      <p class="muted" data-notfound hidden>No estate answered yet. You can still try: the password is checked against your estate before anything is saved.</p>
+      <label for="join-pw">Estate password</label>
+      <input id="join-pw" name="password" type="password" autocomplete="current-password" required>
+      <label class="check"><input type="checkbox" name="show"> Show password</label>
+      <label class="check"><input type="checkbox" name="autoSupervisor" checked> Let this machine host the bus when needed (auto-supervisor — recommended)</label>
+      <div class="row"><button class="primary" type="submit">Join</button></div>
+      <p class="muted">Nothing is saved unless a machine in your estate proves it knows this password.</p>
+    </form>
+
+    <form id="setup" data-action="setup" hidden novalidate>
+      <h2>Set up a new estate</h2>
+      <p class="note warn" data-notfound hidden>No Crosstalk estate found on this network. If you already use Crosstalk on another machine, connect to the same network (or tailnet) and reload instead — setting up here creates a separate estate.</p>
+      <p class="note warn" data-found hidden>An estate already answered on this network — you probably want <button type="button" class="link" data-tab="join">Join your estate</button>. Setting up here creates a separate estate.</p>
+      <label for="setup-pw">Choose the estate password</label>
+      <input id="setup-pw" name="password" type="password" autocomplete="new-password" minlength="16" required aria-describedby="setup-hint">
+      <p id="setup-hint" class="muted">At least 16 characters. Use a passphrase of four or more random words — it is the only secret protecting your estate.</p>
+      <label for="setup-confirm">Type it again</label>
+      <input id="setup-confirm" name="confirm" type="password" autocomplete="new-password" required>
+      <label class="check"><input type="checkbox" name="show"> Show passwords</label>
+      <label class="check"><input type="checkbox" name="autoSupervisor" checked> Let this machine host the bus (auto-supervisor — recommended)</label>
+      <div class="row"><button class="primary" type="submit">Set up estate</button></div>
+    </form>
+
+    <form id="set-password" data-action="set-password" hidden novalidate>
+      <h2>Change estate password</h2>
+      <p class="note warn">Every other machine must then Re-enrol with the new password. Until they do, the estate is split: they won't trust this machine, and it won't trust them.</p>
+      <label for="setpw-pw">New estate password</label>
+      <input id="setpw-pw" name="password" type="password" autocomplete="new-password" minlength="16" required aria-describedby="setpw-hint">
+      <p id="setpw-hint" class="muted">At least 16 characters — a passphrase of four or more random words.</p>
+      <label for="setpw-confirm">Type it again</label>
+      <input id="setpw-confirm" name="confirm" type="password" autocomplete="new-password" required>
+      <label class="check"><input type="checkbox" name="show"> Show passwords</label>
+      <div class="row"><button class="primary" type="submit">Set password</button><button type="button" data-go="enrolled">Back</button></div>
+    </form>
+
+    <form id="re-enrol" data-action="re-enrol" hidden novalidate>
+      <h2>Re-enrol</h2>
+      <p class="muted">The estate password changed on another machine. Enter the new one — it is checked against your estate before anything is saved. Your other settings on this machine are kept.</p>
+      <label for="reenrol-pw">Current estate password</label>
+      <input id="reenrol-pw" name="password" type="password" autocomplete="current-password" required>
+      <label class="check"><input type="checkbox" name="show"> Show password</label>
+      <div class="row"><button class="primary" type="submit">Re-enrol</button><button type="button" data-go="enrolled">Back</button></div>
+    </form>
+
+    <div id="status" role="status" aria-live="polite"></div>
+
+    <section id="finished" hidden>
+      <p class="muted">You can close this tab.</p>
+    </section>
+  </div>
+  <footer class="muted" id="foot">
+    This page talks only to this machine (127.0.0.1). The password never leaves this machine and is never stored — only keys derived from it are, and the check against your estate never sends them either.
+    <button type="button" class="link" id="cancel">Cancel and close</button>
+  </footer>
+</main>
+<script nonce="__NONCE__">
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const status = $('#status');
+  const views = ['loading', 'enrolled', 'join', 'setup', 'set-password', 're-enrol'];
+  let state = null, closed = false;
+
+  function say(kind, text, detail) {
+    status.replaceChildren();
+    if (!text) return;
+    const p = document.createElement('p');
+    p.className = 'note ' + kind;
+    p.textContent = text;
+    if (detail) { const d = document.createElement('span'); d.className = 'detail'; d.textContent = detail; p.append(d); }
+    status.append(p);
+  }
+
+  function show(view) {
+    for (const v of views) $('#' + v).hidden = v !== view;
+    const notEnrolled = view === 'join' || view === 'setup';
+    $('#switch').hidden = !notEnrolled;
+    for (const b of $$('#switch [data-tab]')) b.setAttribute('aria-pressed', String(b.dataset.tab === view));
+    const found = !!(state && state.estate);
+    for (const el of $$('[data-found]')) el.hidden = !found;
+    for (const el of $$('[data-notfound]')) el.hidden = found;
+    say('', '');
+    const first = $('#' + view + ' input[type=password]');
+    if (first) first.focus();
+  }
+
+  function end(text) {
+    closed = true;
+    for (const v of views) $('#' + v).hidden = true;
+    $('#switch').hidden = true;
+    $('#cancel').hidden = true;
+    $('#finished').hidden = false;
+    $('#title').textContent = text;
+  }
+
+  async function post(path, body) {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    let j = {};
+    try { j = await r.json(); } catch {}
+    return { ok: r.ok, status: r.status, body: j };
+  }
+
+  for (const b of $$('[data-tab]')) b.addEventListener('click', () => show(b.dataset.tab));
+  for (const b of $$('[data-go]')) b.addEventListener('click', () => show(b.dataset.go));
+
+  for (const f of $$('form')) {
+    const toggle = $('input[name=show]', f);
+    toggle.addEventListener('change', () => { for (const i of $$('input[name=password], input[name=confirm]', f)) i.type = toggle.checked ? 'text' : 'password'; });
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (closed) return;
+      const pw = $('input[name=password]', f), confirm = $('input[name=confirm]', f), auto = $('input[name=autoSupervisor]', f);
+      const body = { action: f.dataset.action, password: pw.value };
+      if (confirm) body.confirm = confirm.value;
+      if (auto) body.autoSupervisor = auto.checked;
+      const btns = $$('button', f);
+      btns.forEach((b) => { b.disabled = true; });
+      say('', f.dataset.action === 'join' || f.dataset.action === 're-enrol' ? 'Checking the password with your estate…' : 'Saving…');
+      let r;
+      try { r = await post('enrol', body); } catch { r = { ok: false, body: { error: 'This page lost contact with its local server (it may have timed out). Run /crosstalk:enrol again.' } }; }
+      // Never keep the secret in the page longer than needed.
+      pw.value = ''; if (confirm) confirm.value = '';
+      btns.forEach((b) => { b.disabled = false; });
+      if (r.ok && r.body.ok) {
+        end(f.dataset.action === 'setup' ? 'Estate created' : 'Done');
+        say('ok', r.body.message);
+      } else {
+        say('err', r.body.error || 'Something went wrong — nothing was written.', r.body.detail);
+        pw.setAttribute('aria-invalid', 'true');
+        pw.setAttribute('aria-describedby', [...new Set([...(pw.getAttribute('aria-describedby') || '').split(' '), 'status'])].filter(Boolean).join(' '));
+        pw.focus();
+        status.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
+  $('#cancel').addEventListener('click', async () => {
+    try { await post('cancel', {}); } catch {}
+    end('Enrolment cancelled');
+    say('', 'Nothing was written. Run /crosstalk:enrol again whenever you are ready.');
+  });
+
+  (async () => {
+    try {
+      const r = await fetch('state');
+      if (!r.ok) throw new Error();
+      state = await r.json();
+    } catch {
+      $('#loading').hidden = true;
+      say('err', 'This enrol page has expired or its local server stopped. Run /crosstalk:enrol again.');
+      return;
+    }
+    for (const el of $$('[data-host]')) el.textContent = state.host;
+    $('#loading').removeAttribute('aria-busy');
+    show(state.mode);
+  })();
+})();
+</script>
+</body>
+</html>

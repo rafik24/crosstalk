@@ -22,8 +22,8 @@ claude plugin install crosstalk@crosstalk                                       
 
 Claude Code clones the repo, registers the components (hooks reference bundled scripts via
 `${CLAUDE_PLUGIN_ROOT}`), and — on v2.1.224+ — auto-installs the pure-JS deps (`express`, `zod`)
-with `npm ci --ignore-scripts`. Enabling it globally is safe: the hooks **no-op** until you create
-the config below, so they only fire on enrolled machines. (Dev/local instead:
+with `npm ci --ignore-scripts`. Enabling it globally is safe: until the machine is enrolled the
+hooks only print one line pointing at `/crosstalk:enrol`, so they only act on enrolled machines. (Dev/local instead:
 `claude --plugin-dir /path/to/crosstalk`.)
 
 > **Private repo:** the plugin lives in a private GitHub repo, so the install machine needs git
@@ -32,8 +32,8 @@ the config below, so they only fire on enrolled machines. (Dev/local instead:
 
 Then one machine-specific step the plugin can't do for you:
 
-1. **Create the config** `~/.claude/.crosstalk` (the shared token; git-ignored). See §3 below for
-   the fields — creating this file **is** the per-machine opt-in.
+1. **Enrol the machine:** type `/crosstalk:enrol` in a session and finish in the browser page it
+   opens (§3). It writes `~/.claude/.crosstalk` — creating that file **is** the per-machine opt-in.
 
 There is **no host-only build step** any more: the server stores its state in Node's built-in
 `node:sqlite`, so it has zero native dependencies. A bare plugin install can host the bus on any
@@ -88,8 +88,26 @@ cd "$REPO" && npm ci      # ONLY if this node may host the bus; skip for connect
 
 ## 3. Create the connection config — `~/.claude/.crosstalk`
 
-**The easy way (3.3.5+): the estate password.** Start a session with the plugin installed; the
-hook prints the command. Or run it directly:
+**The easy way (3.3.5+): `/crosstalk:enrol`.** Start a session with the plugin installed; the hook
+says *"Crosstalk isn't set up on this machine — type /crosstalk:enrol"*. Type it: Claude runs one
+command that opens a local page in your browser (`127.0.0.1`, random port, one-time link). The page
+looks at this machine and opens on the right form:
+
+| Machine state | Form | What it does |
+|---|---|---|
+| not enrolled, an estate answers | **Join your estate** | one password field → verified against a leader that proves it holds the derived key → config written. Wrong password: *"No estate answered this password — nothing was written."* |
+| not enrolled, nothing answers | **Set up a new estate** | choose + confirm a password (≥16 chars), auto-supervisor on by default → config written without verification (= `--no-verify`). The page warns that this creates a *separate* estate if you already have one elsewhere. |
+| enrolled | **Change estate password** / **Re-enrol** | = `--set-password` / `--re-enrol`: rewrite only the two keys, keep every other line |
+
+The network probe that picks the form is unauthenticated (the machine has no key yet), so you can
+always switch between Join and Set up by hand; every write is still gated as below. The password is
+typed only in the browser — never into the chat — and the page's server is loopback-only, token-,
+Host- and Origin-checked, and exits after one enrolment, Cancel, or 5 minutes idle.
+
+A new estate's first machine must be reachable by the others: its bus binds loopback unless
+`CC_BIND=<its LAN or tailnet IP>` is in its config (the page says so after Set up).
+
+**Headless / SSH: the terminal fallback.** The same core, with a hidden prompt:
 
 ```sh
 node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
@@ -101,8 +119,8 @@ node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
 The keys are derived from the password (never stored) and verified against a leader that proves
 it holds them, so a typo cannot half-enrol the box. First box of a brand-new estate (no leader
 yet): `cc-enrol --no-verify`. Switching an old raw-token estate to a password: on one enrolled box
-`cc-enrol --set-password`, restart its supervisor, then `cc-enrol --re-enrol` on every other box in the
-same sitting (until then the estate is split: old-token boxes will not trust the new leader). The
+`cc-enrol --set-password` (page: **Change estate password**), restart its supervisor, then
+`cc-enrol --re-enrol` (page: **Re-enrol**) on every other box in the same sitting (until then the estate is split: old-token boxes will not trust the new leader). The
 password must be ≥16 chars — a passphrase of four or more random words. Windows: run the prompt from
 Windows Terminal / PowerShell (or `winpty node …`); mintty (Git Bash's default) hides the TTY.
 
@@ -279,10 +297,11 @@ Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load 
 | `⛔ COULD NOT CONNECT` | no leader reachable | is a host running `cc-bus start`? is Tailscale up? try a temporary `CC_BASE=http://<leader-ip>:8787` pin |
 | `curl http://<ip>:8787/cc/whoami` times out | not on the leader's LAN and Tailscale down/logged-out | `tailscale up`; confirm both nodes online in `tailscale status` |
 | Connected but never woken for messages | reply landed in your **own** dm channel with no `@mention` | peers must DM `dm-<your-shortname>` or `@mention` you |
-| `401/403` on register | wrong `CC_TOKEN` | re-enrol by password (`cc-enrol`), or re-copy the token from an enrolled machine |
+| `401/403` on register | wrong `CC_TOKEN` | re-enrol by password (`/crosstalk:enrol` → Re-enrol, or `cc-enrol --re-enrol`), or re-copy the token from an enrolled machine |
 | `[discovery] ⚠️  IGNORING unproven leader …` | this box's token differs from the leader's (or the leader predates 3.3.5) | re-enrol by password; during a 3.3.5 rollout set `CC_DISCOVERY_PROOF=legacy` for that sitting only |
 | Node reboots and bus doesn't come back (host) | no supervisor auto-start | `CC_AUTO_SUPERVISOR=1` in `~/.claude/.crosstalk`, then start one Claude session (see "Keeping a host alive") |
-| Plugin installed, sessions print a "not enrolled" line | no `~/.claude/.crosstalk` | create it per §3 — the file is the per-machine opt-in |
+| Plugin installed, sessions print "Crosstalk isn't set up on this machine" | no `~/.claude/.crosstalk` | type `/crosstalk:enrol` (or the terminal fallback, §3) — the file is the per-machine opt-in |
+| `/crosstalk:enrol` page says it expired | its server exited (one enrolment, Cancel, or 5 min idle) | run `/crosstalk:enrol` again for a fresh one-time link |
 
 ## Keeping a host alive across reboots
 

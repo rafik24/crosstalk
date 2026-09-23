@@ -13,6 +13,9 @@
 //   options: --auto-supervisor  (also set CC_AUTO_SUPERVISOR=1)   --no-verify  (write without
 //            finding a leader — for the FIRST box of a brand-new estate)   --config <path>
 //
+// The usual way in is the browser page (/crosstalk:enrol → cc-enrol-web.mjs), which calls the
+// exported core below; this CLI is the headless/SSH fallback and behaves exactly as before.
+//
 // The password is never stored. Both estate secrets are derived from it with scrypt and fixed,
 // public salts, so every box that knows the password derives the SAME CC_TOKEN / CC_ADMIN_KEY —
 // that is what makes "type the password on the new laptop" equivalent to copying the token file:
@@ -65,7 +68,20 @@ function writeConfig(path, lines) {
   try { chmodSync(path, 0o600); } catch {}
 }
 
-async function verify(token) {
+// --- the enrolment core, shared by this CLI and the browser page (cc-enrol-web.mjs) -------------
+// Exported so the page reuses the SAME derivation, verification and file write: the crypto and
+// the "nothing is written unless a leader proves the token" rule live in exactly one place.
+
+// Why this box may not run `mode` ('join' | 'set-password' | 're-enrol'), or null if it may.
+export function enrolPrecondition(path, mode) {
+  const enrolled = existsSync(path);
+  if (enrolled && mode === 'join') return `already enrolled: ${path} exists. Password changed on the estate? run with --re-enrol (keeps CC_BIND/CC_PEERS/…). Setting a NEW estate password from this box: --set-password.`;
+  if (!enrolled && mode !== 'join') return `${mode === 'set-password' ? '--set-password' : '--re-enrol'} is for an ALREADY-enrolled box (it rewrites its keys, keeping the other settings); to enrol a new box just run cc-enrol`;
+  return null;
+}
+
+// Does a leader on this network PROVE it holds `token`? → { ok: true, leader } | { ok: false, why }
+export async function verifyToken(token) {
   let leader = await resolveFull({ token, lanTimeoutMs: 800, timeoutMs: 2500 });
   if (!leader) {
     // Strict discovery hides unproven leaders. Look once more accepting them, only to tell the
@@ -79,6 +95,26 @@ async function verify(token) {
   return { ok: true, leader };
 }
 
+// Write the enrolment. rewrite=true (set-password / re-enrol) keeps every line of the existing
+// file except the two keys; a fresh enrolment writes just the keys (+ the supervisor opt-in).
+const ENROLMENT_HEADER = '# Crosstalk bus — per-machine enrolment (written by cc-enrol; keys derived from the estate password, never the password itself)';
+export function writeEnrolment(path, { token, admin, autoSupervisor = false, rewrite = false }) {
+  const keep = [];
+  if (rewrite) {   // our own header is re-emitted below — keeping it too stacked one copy per rewrite
+    for (const l of readFileSync(path, 'utf8').split(/\r?\n/)) if (l.trim() && l !== ENROLMENT_HEADER && !/^\s*(export\s+)?CC_(TOKEN|ADMIN_KEY)\s*=/.test(l)) keep.push(l);
+  }
+  writeConfig(path, [
+    ENROLMENT_HEADER,
+    `CC_TOKEN=${token}`,
+    ...(admin ? [`CC_ADMIN_KEY=${admin}`] : []),
+    ...(autoSupervisor && !keep.some((l) => /CC_AUTO_SUPERVISOR/.test(l)) ? ['CC_AUTO_SUPERVISOR=1'] : []),
+    ...keep,
+  ]);
+}
+
+// What --set-password leaves behind, shared with the page so both say the same thing.
+export const SPLIT_WARNING = 'the estate is SPLIT until every other box re-enrols with this password: their supervisors will not trust this box (different token) and will elect among themselves. Do it in one sitting; stop their supervisors first if you can. Then restart the supervisor here.';
+
 async function main() {
   const path = opt('--config') || configPath();
   const setPw = has('--set-password');
@@ -86,11 +122,8 @@ async function main() {
   const rawToken = opt('--token');
   if (rawToken && rawToken.length < 32) { console.error('--token: a raw token this short falls to an offline guess from one sniffed beacon; use ≥32 random characters, or enrol by password'); process.exit(1); }
 
-  if (existsSync(path) && !setPw && !reEnrol) {
-    console.error(`already enrolled: ${path} exists. Password changed on the estate? run with --re-enrol (keeps CC_BIND/CC_PEERS/…). Setting a NEW estate password from this box: --set-password.`);
-    process.exit(1);
-  }
-  if ((setPw || reEnrol) && !existsSync(path)) { console.error(`${setPw ? '--set-password' : '--re-enrol'} is for an ALREADY-enrolled box (it rewrites its keys, keeping the other settings); to enrol a new box just run cc-enrol`); process.exit(1); }
+  const why = enrolPrecondition(path, setPw ? 'set-password' : reEnrol ? 're-enrol' : 'join');
+  if (why) { console.error(why); process.exit(1); }
 
   let token, admin;
   if (rawToken) {
@@ -101,25 +134,14 @@ async function main() {
     ({ token, admin } = deriveKeys(pw));
     if (!setPw && !has('--no-verify')) {
       process.stdout.write('verifying against the estate… ');
-      const v = await verify(token);
+      const v = await verifyToken(token);
       if (!v.ok) { console.log('FAILED'); console.error(`not enrolled: ${v.why}`); process.exit(2); }
       console.log(`ok — leader ${v.leader.host} (epoch ${v.leader.epoch}) proved it`);
     }
   }
 
-  const keep = [];
-  if (setPw || reEnrol) {   // preserve everything except the two keys
-    for (const l of readFileSync(path, 'utf8').split(/\r?\n/)) if (l.trim() && !/^\s*(export\s+)?CC_(TOKEN|ADMIN_KEY)\s*=/.test(l)) keep.push(l);
-  }
-  const lines = [
-    '# Crosstalk bus — per-machine enrolment (written by cc-enrol; keys derived from the estate password, never the password itself)',
-    `CC_TOKEN=${token}`,
-    ...(admin ? [`CC_ADMIN_KEY=${admin}`] : []),
-    ...(has('--auto-supervisor') && !keep.some((l) => /CC_AUTO_SUPERVISOR/.test(l)) ? ['CC_AUTO_SUPERVISOR=1'] : []),
-    ...keep,
-  ];
-  writeConfig(path, lines);
-  if (setPw) console.log(`estate password set — this box now uses the derived keys: ${path}\n⚠️  the estate is SPLIT until every other box runs \`cc-enrol --re-enrol\` with this password: their supervisors will not trust this box (different token) and will elect among themselves. Do it in one sitting; stop their supervisors first if you can. Then restart the supervisor here.`);
+  writeEnrolment(path, { token, admin, autoSupervisor: has('--auto-supervisor'), rewrite: setPw || reEnrol });
+  if (setPw) console.log(`estate password set — this box now uses the derived keys: ${path}\n⚠️  ${SPLIT_WARNING.replace('re-enrols', 'runs `cc-enrol --re-enrol`')}`);
   else console.log(`${reEnrol ? 're-enrolled with the new keys' : 'enrolled'}: ${path}\n${reEnrol ? 'restart the bus supervisor on this box' : 'start a Claude session — the join hook does the rest'}`);
 }
 
