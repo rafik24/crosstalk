@@ -65,6 +65,15 @@ try {
   ok(whoamiProven('', n, { host: 'h', epoch: 3 }, R) === null, 'no token → nothing to check (null, not false)');
   ok(whoamiProven(TOKEN, n, mk(), null) === false, 'a proof with no known reached-address cannot verify');
   ok(whoamiProof(TOKEN, n, 'h', 3, 5, '::ffff:10.0.0.1', 8787) === good, 'an IPv4-mapped IPv6 address matches its bare form');
+  // Issues 48/49: the election reads two more whoami fields — host_id (the collision-safe host
+  // identity) and electing (an unconfirmed term yields to an open one). Both are signed like the
+  // watermark, so an on-path rewrite cannot flip who yields; absent fields keep the old material.
+  const ext = whoamiProof(TOKEN, n, 'h', 3, 5, R.address, R.port, { hostId: '0badc0de', electing: true });
+  const mkx = (over = {}) => ({ host: 'h', epoch: 3, watermark: 5, host_id: '0badc0de', electing: true, proof: ext, ...over });
+  ok(whoamiProven(TOKEN, n, mkx(), R) === true, 'a proof over host_id + electing verifies');
+  ok(whoamiProven(TOKEN, n, mkx({ electing: false }), R) === false, '…and is bound to electing (no in-flight "I am open" rewrite)');
+  ok(whoamiProven(TOKEN, n, mkx({ host_id: 'deadbeef' }), R) === false, '…and to host_id');
+  ok(whoamiProven(TOKEN, n, mk({ electing: true }), R) === false, 'electing cannot be ADDED to a proof that did not sign it');
   const ts = Date.now();
   ok(beaconProven(TOKEN, { host: 'h', epoch: 3, port: 8787, ts, proof: beaconProof(TOKEN, 'h', 3, 8787, ts) }) === true, 'a beacon proof verifies');
   ok(beaconProven(TOKEN, { host: 'h', epoch: 3, port: 8787, ts: ts - 120000, proof: beaconProof(TOKEN, 'h', 3, 8787, ts - 120000) }, ts) === false, 'a 2-minute-old beacon is stale (replay refused)');
