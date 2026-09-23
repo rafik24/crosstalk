@@ -6,7 +6,7 @@ context:
 execution:
   model: haiku
   runs: 1
-  max_turns: 8
+  max_turns: 12
   timeout_seconds: 150
   allowed_tools: [Skill, Bash]
   prompt: |

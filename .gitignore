@@ -20,3 +20,8 @@ node_modules/
 evals/results/*.json
 evals/results/2026-*/
 evals/results/bus-*.log
+evals/results/a4-r2.json
+evals/results/a4-r2/
+evals/results/traces/
+evals/results/*.out
+evals/results/*.pid
