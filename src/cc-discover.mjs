@@ -22,6 +22,7 @@ import dgram from 'node:dgram';
 import http from 'node:http';
 import https from 'node:https';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { configPath } from './cc-paths.mjs';
 import { canonicalShort } from './cc-render.mjs';
 import { nonce, whoamiProven, beaconProven, proofMode } from './cc-proof.mjs';
@@ -70,6 +71,33 @@ export function loadConfig() {
   // for a zero-config estate, wrong for a dev fleet or a CI run that must never find a stranger.
   const discovery = (process.env.CC_DISCOVERY || out.CC_DISCOVERY || '').toLowerCase() === 'peers' ? 'peers' : 'auto';
   return { token, admin, bind, allowFileOrigin, pin, port, beaconPort, peers, discovery };
+}
+
+// --- host identity (issue 49) ---
+// The canonical slug (canonicalShort) is a NAME — what the logs, the console and DM routing show —
+// and it collides: `box_1`, `box-1` and `BOX 1` all slug to `box-1`, every all-non-ASCII hostname to
+// `unknown-host`. Deciding "is that the same machine?" on it made two boxes one: the #35 same-host
+// guard stopped replication between them, their supervisors shared one presence id, and the
+// election tie-break saw a true tie. Those decisions now key on a HOST ID: a short hash of the raw
+// hostname, case-folded because casing alone must never split one box (issue 39 — the OS and the
+// config spell the same box differently). Stateless on purpose: nothing to persist or lose, and a
+// box keeps its id across reinstalls. Two machines with byte-identical hostnames still collide —
+// that is a misconfigured estate (DNS and the tailnet collide too), not something to paper over.
+export function hostIdOf(raw) {
+  return createHash('sha256').update('host|' + String(raw ?? '').normalize('NFC').trim().toLowerCase()).digest('hex').slice(0, 8);
+}
+// This process's identity, derived exactly as the supervisor derives its own (CC_HOST wins).
+export function localHostIdentity() {
+  const raw = process.env.CC_HOST || hostname();
+  return { host: canonicalShort(raw) || 'unknown-host', hostId: hostIdOf(raw) };
+}
+// Same machine? Slugs must agree; when BOTH sides carry a host id, so must the ids. A peer that
+// advertises none (pre-3.3.5, during the rollout's mixed-version window) falls back to the slug.
+export function sameHost(a, b) {
+  if (!a || !b) return false;
+  const slug = (x) => canonicalShort(String(x.host || '')) || 'unknown-host';
+  if (slug(a) !== slug(b)) return false;
+  return a.hostId && b.hostId ? a.hostId === b.hostId : true;
 }
 
 // --- cache ---
@@ -162,6 +190,7 @@ export async function whoami(base, timeoutMs = 1500, token = undefined) {
     // message id served — a freshness proxy the election uses to break an equal-epoch tie.
     return {
       base, host: j.host, epoch: j.epoch, role: j.role || 'leader',
+      hostId: typeof j.host_id === 'string' && j.host_id ? j.host_id : null,   // collision-safe host identity (issue 49); null from a pre-3.3.5 peer
       rev: j.rev || null, dirty: !!j.dirty,
       watermark: typeof j.watermark === 'number' ? j.watermark : 0,
       draining: !!j.draining,   // the leader is in a drain stepdown (read-only, about to leave)
@@ -179,7 +208,9 @@ export async function whoami(base, timeoutMs = 1500, token = undefined) {
 //                                        stale returning leader can't clobber fresher history.
 //                                        "most-writes-win" — a defensible, deterministic policy
 //                                        strictly better than the old arbitrary hostname tie.
-//   3. then lexicographically LOWEST host — final deterministic tiebreak (equal epoch+watermark).
+//   3. then lexicographically LOWEST host — final deterministic tiebreak (equal epoch+watermark);
+//                                        two boxes whose names slug alike are ordered by host id
+//                                        (issue 49) — else they were a true tie that nothing broke.
 // Returns true when `a` should beat `b`.
 export function outranks(a, b) {
   if (!b) return !!a;
@@ -191,7 +222,8 @@ export function outranks(a, b) {
   // filter instance ids get) and compare code points. localeCompare on raw hostnames made the
   // winner of an exact tie depend on casing and platform locale.
   const ah = canonicalShort(String(a.host || '')), bh = canonicalShort(String(b.host || ''));
-  return ah < bh;
+  if (ah !== bh) return ah < bh;
+  return !!(a.hostId && b.hostId) && a.hostId < b.hostId;   // one side without an id (pre-3.3.5): a tie, as before
 }
 
 // pick the authoritative leader among responders per the outranks() ordering.
@@ -318,7 +350,6 @@ export async function resolveFull(opts = {}) {
   const cfg = loadConfig();
   const pin = opts.pin ?? cfg.pin;
   const port = cfg.port;
-  const selfHost = (process.env.CC_HOST || hostname());
 
   const bases = new Set();
   if (pin) bases.add(pin.replace(/\/$/, ''));
@@ -340,7 +371,9 @@ export async function resolveFull(opts = {}) {
   const responders = await Promise.all([...bases].map((b) => whoami(b, opts.timeoutMs || 1500, opts.token ?? cfg.token)));
   let best = pickAuthoritative(responders);
   // Optionally ignore a leader that is THIS node (election needs "is anyone ELSE leading?").
-  if (best && opts.skipSelf && best.host === selfHost && isLoopbackOrSelf(best.base)) {
+  // (sameHost, not a raw-hostname ===: a leader advertises its canonical slug, so an uppercase OS
+  // hostname never matched itself here and a supervisor could "discover" its own server.)
+  if (best && opts.skipSelf && sameHost(best, localHostIdentity()) && isLoopbackOrSelf(best.base)) {
     const others = pickAuthoritative(responders.filter((r) => r && r.base !== best.base));
     best = others;
   }

@@ -55,6 +55,9 @@ function resolveConfig(opts = {}) {
     allowNoAuth: opts.allowNoAuth === true || env.CC_ALLOW_NO_AUTH === '1',
     epoch: Number(opts.epoch ?? env.CC_EPOCH ?? 0),
     host: (opts.host ?? env.CC_HOST) || os.hostname(),
+    // Collision-safe host identity (issue 49) — the supervisor passes its own; advertised in whoami
+    // so peers compare machines on it rather than on the (colliding) canonical slug. Unset ⇒ omitted.
+    hostId: (opts.hostId ?? env.CC_HOST_ID) || null,
     // Where the .stepdown marker lands (issue #34); the supervisor passes CC_DATA_DIR. Unset ⇒ no marker.
     dataDir: opts.dataDir ?? env.CC_DATA_DIR ?? null,
     // /cc/stepdown ends the PROCESS (not just the listener) — true for a real spawned server; tests
@@ -281,10 +284,11 @@ export async function startServer(opts = {}) {
     const n = typeof req.query.nonce === 'string' && /^[0-9a-f]{16,64}$/.test(req.query.nonce) ? req.query.nonce : null;
     res.json({
       role: 'leader', host: config.host, epoch: config.epoch, base: config.baseUrl,
+      ...(config.hostId ? { host_id: config.hostId } : {}),   // collision-safe host identity (issue 49)
       watermark, rev: code.rev, dirty: code.dirty,
       version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
       ...(draining ? { draining: true } : {}),   // a drain stepdown is in progress (issue 43)
-      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort) } : {}),
+      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort, { hostId: config.hostId }) } : {}),
     });
   });
 
