@@ -130,7 +130,10 @@ export function renderLine(msg, identity, addressed = true) {
 // first are continuations too, so they carry CONT (a forged header 400 chars in must not surface).
 // Cuts are in UTF-16 units, so a cut that would land between the halves of a surrogate pair (an
 // emoji) backs off one unit — otherwise CONT would sit between them and each half render as U+FFFD.
+// Every piece must advance: the width is clamped so a continuation carries >= 2 units after CONT,
+// and a cut that would not move (a back-off at step 1) takes the whole pair instead.
 function hardWrap(line, width) {
+  width = Math.max(width, CONT.length + 2);
   if (line.length <= width) return [line];
   const cut = (at) => (at < line.length && isHighSurrogate(line.charCodeAt(at - 1)) ? at - 1 : at);
   let end = cut(width);
@@ -138,6 +141,7 @@ function hardWrap(line, width) {
   const step = width - CONT.length;
   for (let i = end; i < line.length; i = end) {
     end = cut(Math.min(i + step, line.length));
+    if (end <= i) end = Math.min(i + 2, line.length);
     out.push(CONT + line.slice(i, end));
   }
   return out;

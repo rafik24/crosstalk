@@ -3,6 +3,9 @@
 // notification wrapping that fixes DM truncation.
 //   node test/render.test.mjs
 import assert from 'node:assert';
+import { spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as render from '../src/cc-render.mjs';
 const { addressedTo, isAtAll, renderLine, wrapForNotification, WRAP_WIDTH, MAX_LINES_PER_BLOCK, canonicalShort, shortIdOf } = render;
 // #51 additions, read off the namespace so this file still RUNS (and fails loudly) against a
@@ -148,6 +151,34 @@ ok(!addressedTo({ channel: 'dm-someone-else', content: 'x' }, 'winbox/reclaim_of
   ok(physical.every((l) => !lone.test(l)), 'F5: no physical line carries half a surrogate pair');
   ok(physical.every((l) => l.length <= WRAP_WIDTH), `F5: still <= ${WRAP_WIDTH} per line`);
   eq(physical.map((l, i) => (i ? l.slice(CONT.length) : l)).join(''), head + content, 'F5: the emoji survives the wrap intact');
+}
+
+// --- hardWrap always makes progress, even at a degenerate width ------------------------------------
+// width 3 (step 1) + a cut after a high surrogate used to leave the cursor where it was → an endless
+// loop (RangeError: Invalid array length); width <= 2 looped even without surrogates. Each case runs
+// in a CHILD with a timeout, so a regression fails here instead of hanging the suite.
+{
+  const RENDER = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cc-render.mjs')).href;
+  const probe = (text, width) => {
+    const code = `const { wrapForNotification, CONT } = await import(${JSON.stringify(RENDER)});
+      const t = ${text};
+      const lines = wrapForNotification(t, { width: ${width} }).flatMap((b) => b.split('\\n')).filter((l) => !l.startsWith('‹part'));
+      const back = lines.map((l, i) => (i ? l.slice(CONT.length) : l)).join('');
+      const lone = /[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]/;
+      console.log(JSON.stringify({ intact: back === t, lone: lines.some((l) => lone.test(l)) }));`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 5000 });
+    try { return JSON.parse(r.stdout); } catch { return { error: r.error ? r.error.code : ((r.stderr || '').split('\n').find((l) => /Error/.test(l)) || `exit ${r.status}`).trim() }; }
+  };
+  const emojiText = "'ab' + String.fromCodePoint(0x1F600) + String.fromCodePoint(0x1F600) + 'cd'";
+  for (const [name, text, width] of [
+    ['width 3 + surrogates', emojiText, 3],
+    ['width 1, plain text', "'abcdefgh'", 1],
+    ['width 2, plain text', "'abcdefgh'", 2],
+  ]) {
+    const r = probe(text, width);
+    ok(!r.error, `hardWrap [${name}] returns (no hang / crash)${r.error ? ' — ' + r.error : ''}`);
+    ok(r.intact === true && r.lone === false, `hardWrap [${name}] keeps the text intact, no lone surrogate (${JSON.stringify(r)})`);
+  }
 }
 
 // --- #51 server-side defence in depth: neutraliseForgedHeaders quotes, never drops ---------------
