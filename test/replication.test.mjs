@@ -10,7 +10,8 @@
 //       200 for a message that is about to vanish
 //   R4  THREE nodes: both replicas see the drain and race for the term — exactly ONE ends up
 //       leading (held stable past a leader-monitor tick), the other re-points as a client, the
-//       ex-leader does not snatch the term back, nothing is lost
+//       ex-leader does not snatch the term back, nothing is lost — and (issue 52) only ONE node ever
+//       promotes at the new epoch: the replica whose pull released the drain; the other holds off
 //   R5  a drain with NO replica attached does not hang: it degrades to an immediate stepdown
 //   R6  the drain at the DEFAULT cadence (30s pulls, 15s checks — what the live fleet runs): the
 //       replica's failover check notices `draining`, pulls at once, and the leader leaves on that
@@ -106,6 +107,12 @@ try {
     ok(await f.waitFor(async () => (await f.settled(0)) && (await f.settled(1)) && (await f.settled(2)), 45000), 'all three supervisors settled (one leader, two clients)');
     const msgs = await f.messages('repl');
     ok(msgs.some((x) => x.id === m.id), `message id ${m.id} survived the raced handover`);
+    // Issue 52: "exactly one leader in the end" tolerated a same-epoch double promotion that the
+    // leader monitor untangled ~5s later — with the loser's acknowledged writes dropped and no epoch
+    // change for anyone to notice. Only the replica whose pull RELEASED the drain may elect at once.
+    const promotions = [0, 1, 2].map((i) => (f.log(i).match(/becoming LEADER at epoch 2\b/g) || []).length);
+    ok(promotions.reduce((a, b) => a + b, 0) === 1, `exactly ONE node ever promoted at epoch 2 (per node: ${promotions.join('/')})`);
+    ok([1, 2].some((i) => /pulled the FINAL snapshot/.test(f.log(i))), 'the promoting replica knew it held the final snapshot (x-cc-released)');
     { const left = await f.destroy(); ok(left.length === 0, `teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`); }
   }
 
