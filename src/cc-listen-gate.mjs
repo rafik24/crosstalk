@@ -48,7 +48,10 @@ try {
   const cfgPath = configPath();   // ~/.claude/.crosstalk, back-compat ~/.claude/.cross-claude-bus
   const cfg = {};
   try { for (const l of readFileSync(cfgPath, 'utf8').split(/\r?\n/)) { const m = l.match(/^\s*(?:export\s+)?(CC_[A-Z_]+)\s*=\s*(.*?)\s*$/); if (m) cfg[m[1]] = m[2].replace(/^["']|["']$/g, ''); } } catch {}
-  if (!cfg.CC_BASE) done(0);
+  // Enrolled = the config file holds an estate token (the same config cc-join.sh keys on). It used
+  // to be `CC_BASE`, but a discovery/password enrolment deliberately has NO CC_BASE (the leader is
+  // discovered, not pinned) — so on every such machine the gate silently allowed everything (#59).
+  if (!cfg.CC_TOKEN) done(0);
   if (process.env.CC_LISTEN_BYPASS) done(0, '[cc-listen-gate] BYPASS active — allowed without a listen check (logged).');
 
   const tool = payload.tool_name || '';

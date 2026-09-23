@@ -9,6 +9,7 @@
 //   4. Codex `apply_patch` outside the estate           → exit 0
 //   5. Codex `apply_patch` with a fresh beacon          → exit 0
 //   6. patchPaths() parses Update/Add/Delete/Move headers of a multi-file patch
+//   8. a discovery enrolment (CC_TOKEN, NO CC_BASE) is gated too (#59); no config / no token → allowed
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -77,6 +78,22 @@ ok(r.code === 0, '5: Codex apply_patch on estate path with a fresh beacon → al
   const old2 = new Date(Date.now() - 120000); utimesSync(beacon, old2, old2);
   const rr = spawnSync(process.execPath, [viaLink], { input: JSON.stringify({ session_id: SID, cwd: 'D:\\estate\\app', tool_name: 'apply_patch', tool_input: { command: patch('core/x.py') } }), encoding: 'utf8', env: { ...process.env, HOME, USERPROFILE: HOME, CC_BUS_CONFIG: CFG, CC_LISTEN_BYPASS: '' } });
   ok(rr.status === 2 && /NOT listening/.test(rr.stderr), '7: gate invoked through a junction to src/ still BLOCKS (realpath main-module check)');
+  writeFileSync(beacon, String(Date.now()));
+}
+
+// 8: a DISCOVERY/password enrolment has no CC_BASE (cc-enrol never writes one) — it is still
+//    enrolled and must be gated (#59: the gate keyed on CC_BASE and allowed everything there).
+{
+  const run = (cfgPath) => spawnSync(process.execPath, [GATE], { input: JSON.stringify({ session_id: SID, tool_name: 'Edit', tool_input: { file_path: 'D:\\estate\\app\\core\\x.py' } }), encoding: 'utf8', env: { ...process.env, HOME, USERPROFILE: HOME, CC_BUS_CONFIG: cfgPath, CC_LISTEN_BYPASS: '' } });
+  const old3 = new Date(Date.now() - 120000); utimesSync(beacon, old3, old3);
+  const discCfg = join(HOME, 'discovery.cfg');
+  writeFileSync(discCfg, 'CC_TOKEN=tt\nCC_ESTATE=D:/estate/app\nCC_AUTO_SUPERVISOR=1\n');
+  const d = run(discCfg);
+  ok(d.status === 2 && /NOT listening/.test(d.stderr), '8: enrolled by discovery (CC_TOKEN + CC_ESTATE, NO CC_BASE), no fresh beacon, Edit in the estate → BLOCKED');
+  ok(run(join(HOME, 'no-such-config')).status === 0, '8b: no config at all (not enrolled) → allowed');
+  const noTok = join(HOME, 'notoken.cfg');
+  writeFileSync(noTok, 'CC_ESTATE=D:/estate/app\n');
+  ok(run(noTok).status === 0, '8c: a config with no CC_TOKEN is not an enrolment → allowed');
   writeFileSync(beacon, String(Date.now()));
 }
 

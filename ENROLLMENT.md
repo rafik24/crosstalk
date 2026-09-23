@@ -197,7 +197,9 @@ to be listening — **recommended but optional** (fail-open; enforces "every ses
 Replace `<REPO>` with the absolute clone path (forward slashes). If you already have hooks,
 **merge** these into the existing `SessionStart` / `PreToolUse` arrays rather than replacing.
 The listen-gate is fail-open (any error / not-enrolled → allow) and can be bypassed once with
-`CC_LISTEN_BYPASS=1`.
+`CC_LISTEN_BYPASS=1`. "Enrolled" means the config holds a `CC_TOKEN` — a discovery or password
+enrolment (no `CC_BASE`) is gated too (before 3.3.5 only a `CC_BASE`-pinned machine was). Without
+`CC_ESTATE` in the config, it gates every file the session edits.
 
 > **No `CC_BASE` needed.** The SessionStart hook (`cc-join.sh`) discovers the leader itself —
 > the same `cc-discover.mjs` path every `cc-*.mjs` client uses (`resolveFast` → `resolveFull`:
