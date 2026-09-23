@@ -104,6 +104,8 @@
       <input id="setup-confirm" name="confirm" type="password" autocomplete="new-password" required>
       <label class="check"><input type="checkbox" name="show"> Show passwords</label>
       <label class="check"><input type="checkbox" name="autoSupervisor" checked> Let this machine host the bus (auto-supervisor — recommended)</label>
+      <label class="check"><input type="checkbox" name="lan" checked aria-describedby="lan-hint"> Let other machines on this network join (recommended)</label>
+      <p id="lan-hint" class="muted">Its bus then listens on the network, not just this machine. Every request still needs the estate key, and machines only trust a bus that proves it holds it. Untick for a single-machine estate.</p>
       <div class="row"><button class="primary" type="submit">Set up estate</button></div>
     </form>
 
@@ -195,10 +197,11 @@
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       if (closed) return;
-      const pw = $('input[name=password]', f), confirm = $('input[name=confirm]', f), auto = $('input[name=autoSupervisor]', f);
+      const pw = $('input[name=password]', f), confirm = $('input[name=confirm]', f), auto = $('input[name=autoSupervisor]', f), lan = $('input[name=lan]', f);
       const body = { action: f.dataset.action, password: pw.value };
       if (confirm) body.confirm = confirm.value;
       if (auto) body.autoSupervisor = auto.checked;
+      if (lan) body.lan = lan.checked;
       const btns = $$('button', f);
       btns.forEach((b) => { b.disabled = true; });
       say('', f.dataset.action === 'join' || f.dataset.action === 're-enrol' ? 'Checking the password with your estate…' : 'Saving…');

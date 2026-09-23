@@ -96,7 +96,7 @@ looks at this machine and opens on the right form:
 | Machine state | Form | What it does |
 |---|---|---|
 | not enrolled, an estate answers | **Join your estate** | one password field → verified against a leader that proves it holds the derived key → config written. Wrong password: *"No estate answered this password — nothing was written."* |
-| not enrolled, nothing answers | **Set up a new estate** | choose + confirm a password (≥16 chars), auto-supervisor on by default → config written without verification (= `--no-verify`). The page warns that this creates a *separate* estate if you already have one elsewhere. |
+| not enrolled, nothing answers | **Set up a new estate** | choose + confirm a password (≥16 chars); auto-supervisor and **"Let other machines on this network join"** on by default → config written without verification (= `--no-verify --auto-supervisor --lan`). The page warns that this creates a *separate* estate if you already have one elsewhere. |
 | enrolled | **Change estate password** / **Re-enrol** | = `--set-password` / `--re-enrol`: rewrite only the two keys, keep every other line |
 
 The network probe that picks the form is unauthenticated (the machine has no key yet), so you can
@@ -104,8 +104,12 @@ always switch between Join and Set up by hand; every write is still gated as bel
 typed only in the browser — never into the chat — and the page's server is loopback-only, token-,
 Host- and Origin-checked, and exits after one enrolment, Cancel, or 5 minutes idle.
 
-A new estate's first machine must be reachable by the others: its bus binds loopback unless
-`CC_BIND=<its LAN or tailnet IP>` is in its config (the page says so after Set up).
+A new estate's first machine must be reachable by the others. Its bus binds loopback unless the
+config sets `CC_BIND`, so Set up's **"Let other machines on this network join"** (default on;
+terminal: `--lan`) writes `CC_BIND=0.0.0.0`, the setting the existing estate uses. That exposure is
+authenticated both ways: every request needs the estate token, and discovery only adopts a leader
+that proves it holds it. Untick it for a single-machine estate (no `CC_BIND`: loopback only); you
+can add `CC_BIND=0.0.0.0` later and restart the supervisor.
 
 **Headless / SSH: the terminal fallback.** The same core, with a hidden prompt:
 
@@ -118,7 +122,7 @@ node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
 
 The keys are derived from the password (never stored) and verified against a leader that proves
 it holds them, so a typo cannot half-enrol the box. First box of a brand-new estate (no leader
-yet): `cc-enrol --no-verify`. Switching an old raw-token estate to a password: on one enrolled box
+yet): `cc-enrol --no-verify --lan` (`--lan` writes `CC_BIND=0.0.0.0` so other machines can reach it). Switching an old raw-token estate to a password: on one enrolled box
 `cc-enrol --set-password` (page: **Change estate password**), restart its supervisor, then
 `cc-enrol --re-enrol` (page: **Re-enrol**) on every other box in the same sitting (until then the estate is split: old-token boxes will not trust the new leader). The
 password must be ≥16 chars — a passphrase of four or more random words. Windows: run the prompt from

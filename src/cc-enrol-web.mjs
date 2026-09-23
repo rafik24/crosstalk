@@ -93,14 +93,18 @@ async function enrol(path, host, req) {
     leader = v.leader;
   }
   const autoSupervisor = (action === 'join' || action === 'setup') && req.autoSupervisor !== false;
-  writeEnrolment(path, { token, admin, autoSupervisor, rewrite: action === 'set-password' || action === 're-enrol' });
+  // Set up: "let other machines on this network join" (default on) → CC_BIND=0.0.0.0 (#60).
+  const lan = action === 'setup' && req.lan !== false;
+  writeEnrolment(path, { token, admin, autoSupervisor, lan, rewrite: action === 'set-password' || action === 're-enrol' });
 
   const bus = join(HERE, 'cc-bus.mjs').replace(/\\/g, '/');
   const message = {
     join: `Enrolled ✓ as ${host}. New sessions on this machine join the bus automatically; this session joins the next time you start or resume it.`,
     setup: `Estate created ✓ — ${host} is its first machine. ${autoSupervisor
       ? 'Start a new Claude session: it starts the bus here.'
-      : `Nothing hosts the bus yet — run node "${bus}" start, or enable the auto-supervisor.`} Other machines join with the same password via /crosstalk:enrol. They can only reach this machine if its bus listens beyond loopback: add CC_BIND=<this machine's LAN or tailnet IP> to ${path} first.`,
+      : `Nothing hosts the bus yet — run node "${bus}" start, or enable the auto-supervisor.`} ${lan
+      ? 'Other machines on this network join with the same password via /crosstalk:enrol. Its bus listens on the network (CC_BIND=0.0.0.0); every request needs the estate key, and machines only trust a bus that proves it holds it.'
+      : `Only this machine can reach its bus (it listens on loopback). To let other machines join later, add CC_BIND=0.0.0.0 to ${path} and restart the bus supervisor.`}`,
     'set-password': `Estate password set ✓ — this machine now uses the keys derived from it. Next, on every other machine run /crosstalk:enrol → Re-enrol with this password: ${SPLIT_WARNING}`,
     're-enrol': `Re-enrolled ✓ with the new estate password. Restart the bus supervisor on this machine so it uses the new keys.`,
   }[action];

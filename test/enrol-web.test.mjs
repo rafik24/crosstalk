@@ -18,6 +18,9 @@
 //   W10 the server exits after the idle timeout, and on Cancel
 //   W11 the launcher returns at once and leaves the server running (detached), which then exits
 //   W12 no response body ever carried a password or a derived key
+//   W13 the join hook points an unenrolled machine at /crosstalk:enrol
+//   W14 Set up's "let other machines join" → CC_BIND=0.0.0.0 (default on); unticked → none (#60)
+//   W15 the CLI's --lan does the same on the --no-verify path (#60)
 // ---------------------------------------------------------------------------
 import http from 'node:http';
 import net from 'node:net';
@@ -252,6 +255,36 @@ try {
     const fallback = (out.match(/node "([^"]+cc-enrol\.mjs)"/) || [])[1];
     ok(hook.status === 0 && /type \/crosstalk:enrol/.test(out) && out.split('\n').length === 1, `one line naming /crosstalk:enrol (${out.slice(0, 60)}…)`);
     ok(fallback && existsSync(fallback), `the Headless/SSH fallback path exists (${fallback})`);
+  }
+
+  console.log('W14 Set up: "let other machines join" writes CC_BIND=0.0.0.0; unticked writes none (#60)');
+  {
+    const setup = async (name, extra) => {
+      const s = await start(name);
+      const r = await post(s, 'enrol', { action: 'setup', password: PW, confirm: PW, ...extra });
+      await within(s.exited, 3000);
+      return { r, text: existsSync(s.config) ? readFileSync(s.config, 'utf8') : '' };
+    };
+    const on = await setup('w14-on', { lan: true });
+    ok(on.r.status === 200 && /^CC_BIND=0\.0\.0\.0$/m.test(on.text) && /on the network/.test(on.r.json?.message), 'ticked → CC_BIND=0.0.0.0 written, message says it listens on the network');
+    const off = await setup('w14-off', { lan: false });
+    ok(off.r.status === 200 && off.text.includes('CC_TOKEN=') && !/CC_BIND/.test(off.text) && /Only this machine/.test(off.r.json?.message), 'unticked → no CC_BIND (this machine only), message says so');
+    const dflt = await setup('w14-default', {});
+    ok(/^CC_BIND=0\.0\.0\.0$/m.test(dflt.text), 'not sent → defaults ON (CC_BIND=0.0.0.0)');
+  }
+
+  console.log('W15 CLI: cc-enrol --no-verify --lan writes CC_BIND=0.0.0.0; without --lan none (#60)');
+  {
+    const ENROL = join(__dirname, '..', 'src', 'cc-enrol.mjs');
+    const cli = (name, extra) => {
+      const config = join(SCRATCH, name);
+      const r = spawnSync(process.execPath, [ENROL, '--config', config, '--no-verify', '--auto-supervisor', ...extra], { encoding: 'utf8', timeout: 30000, env: { ...process.env, CC_ENROL_PASSWORD_FOR_TESTS: PW } });
+      return { status: r.status, text: existsSync(config) ? readFileSync(config, 'utf8') : '' };
+    };
+    const withLan = cli('w15-lan', ['--lan']);
+    ok(withLan.status === 0 && /^CC_BIND=0\.0\.0\.0$/m.test(withLan.text) && withLan.text.includes(`CC_TOKEN=${KEYS.token}`), '--lan → CC_BIND=0.0.0.0 alongside the derived keys');
+    const without = cli('w15-plain', []);
+    ok(without.status === 0 && without.text.includes(`CC_TOKEN=${KEYS.token}`) && !/CC_BIND/.test(without.text), 'no --lan → no CC_BIND');
   }
 
   console.log('W12 no response ever carried a secret');
