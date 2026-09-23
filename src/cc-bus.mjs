@@ -82,6 +82,10 @@ const GUARD_MAX_MS = Math.max(15000, parseInt(process.env.CC_PROMOTE_GUARD_MS) |
 const DRAIN_FOLLOW_MAX_MS = 30000;  // > the server's drain deadline (20s): never follow a drain forever
 const RELEASE_GRACE_MS = 5000;      // issue 52: a replica that did NOT release the drain waits this long (plus
 const RELEASE_JITTER_MS = 3000;     // a per-host spread) before electing, so the replica that DID can promote alone
+// Issue 48: a supervisor that finds no bus at start-up re-scans after a per-host delay in [0, this).
+// CC_COLD_START_JITTER_MS=0 turns the stagger off (the fleet tests do, to force a true simultaneous
+// double promotion onto the electing gate — the stagger would otherwise hide it).
+const COLD_START_JITTER_MS = (() => { const v = parseInt(process.env.CC_COLD_START_JITTER_MS); return Number.isFinite(v) ? Math.max(0, v) : 2000; })();
 
 // Is `pid` a live process? signal 0 tests existence cross-platform: it throws ESRCH when the
 // process is gone and EPERM when it exists but we can't signal it (still alive → true).
@@ -187,7 +191,7 @@ function isThisHost(peer) {
 }
 
 // --- spawn the vendored server as leader at a given epoch ---
-function spawnLeader(epoch, port, token) {
+function spawnLeader(epoch, port, token, { electing = false } = {}) {
   // `--disable-warning=ExperimentalWarning` silences the one-time "SQLite is an experimental
   // feature" line that node:sqlite (server/db.mjs) prints on load, so it never spams the bus
   // logs — while leaving every other warning intact. Only THIS type is disabled.
@@ -198,7 +202,8 @@ function spawnLeader(epoch, port, token) {
       MCP_API_KEY: token || process.env.MCP_API_KEY || '',
       CC_EPOCH: String(epoch),
       CC_HOST: HOST,
-      CC_HOST_ID: HOST_ID,   // advertised in whoami: peers tell this box from a same-slug one (issue 49)
+      CC_HOST_ID: HOST_ID,
+      CC_ELECTING: electing ? '1' : '',   // start read-only until POST /cc/open (issue 48); '' = open at once   // advertised in whoami: peers tell this box from a same-slug one (issue 49)
       CC_DATA_DIR: DATA_DIR,
       // Pass the admin key through explicitly so the server honours it even when it came from the
       // config FILE (loadConfig) rather than the ambient env — otherwise /cc/export etc. stay
@@ -396,7 +401,7 @@ async function cmdStart() {
     currentEpoch = epoch;
     role = 'leader';
     log(`no bus present → becoming LEADER at epoch ${epoch} (port ${port})`);
-    child = spawnLeader(epoch, port, token);
+    child = spawnLeader(epoch, port, token, { electing: true });   // read-only until the term is confirmed (issue 48)
     // CC_DISCOVERY=peers: a confined bus neither scans nor ADVERTISES itself on the LAN.
     stopBeacon = cfg.discovery === 'peers' ? null : startBeacon({ host: HOST, epoch, port, beaconPort: cfg.beaconPort, token });
 
@@ -419,37 +424,69 @@ async function cmdStart() {
     // lexicographically-lower host) and step down to it. Using the shared outranks() ordering
     // means the monitor and discovery can never disagree, so a stale co-leader always yields to
     // the freshest one (#7). A repeating check (not one-shot) so any tie/race self-corrects.
-    monitorIv = setInterval(async () => {
-      if (role !== 'leader') { clearInterval(monitorIv); monitorIv = null; return; }
-      const peer = await resolveFull({ token, skipLoopback: true, skipSelf: true });
-      if (!peer) return;
-      // Read our OWN watermark from loopback for the equal-epoch tiebreak. If our server can't be
-      // read right now, SKIP this tick rather than compare against a phantom watermark of 0 — a
-      // transient loopback miss must never cause a false step-down that would forfeit our newer
-      // writes to a same-epoch peer. Next tick retries.
-      const self = await whoami(`http://127.0.0.1:${port}`, 1000);
-      if (!self) return;
-      const me = { epoch, watermark: self.watermark ?? 0, host: HOST };
-      if (outranks(peer, me)) {
-        log(`peer ${peer.host} (epoch ${peer.epoch}, watermark ${peer.watermark ?? 0}) outranks me ` +
-            `(${HOST} epoch ${epoch}, watermark ${me.watermark}) → stepping down to CLIENT`);
-        clearInterval(monitorIv); monitorIv = null;
-        steppingDown = true;
-        // Watchdog (#34): the stepdown REQUEST is not the stepdown. If the child has not exited
-        // shortly after the POST (a wedged close, a hung event loop), escalate: kill, then SIGKILL.
-        // Without this, a stepdown that never completed left the supervisor 'leader' forever with
-        // no listener — the exact wedge of the 3.3.2 rollout. child.on('exit') clears the flags.
-        const c = child;
-        const watchdog = setTimeout(() => {
-          if (c.exitCode === null && c.signalCode === null) { log('stepdown watchdog: server still alive 5s after /cc/stepdown → kill()'); try { c.kill(); } catch {} }
-          setTimeout(() => {
-            if (c.exitCode === null && c.signalCode === null) { log('stepdown watchdog: still alive → SIGKILL'); try { c.kill('SIGKILL'); } catch {} }
-          }, 5000).unref?.();
-        }, 5000);
-        watchdog.unref?.();
-        try { await fetch(`http://127.0.0.1:${port}/cc/stepdown`, { method: 'POST', headers: { Authorization: adminBearer(token) } }); } catch { try { child.kill(); } catch {} }
-      }
-    }, 5000);
+    //
+    // It is also what OPENS the term (issue 48). The server starts read-only ("electing"); the first
+    // check runs as soon as our own server answers, and if no peer outranks us we POST /cc/open. Why
+    // that is enough: every rival that promoted at the same time is ALSO listening before it scans.
+    // So of any two, the one that scans second sees the first — at worst still electing, which it
+    // orders against by watermark/host; if the first is already open, outranks() makes the open one
+    // win. Either way exactly one opens, and the loser steps down having acknowledged nothing. An
+    // open leader never yields to an electing peer at its own epoch, so an acknowledged write is
+    // never forfeited to a rival that took none.
+    const loop = `http://127.0.0.1:${port}`;
+    const myChild = child;
+    let checking = false;
+    const leadershipCheck = async () => {
+      if (role !== 'leader' || child !== myChild) { if (monitorIv) { clearInterval(monitorIv); monitorIv = null; } return; }
+      if (checking) return;   // a slow scan must not stack on the next tick
+      checking = true;
+      try {
+        // Our OWN server first: it must be listening BEFORE we scan (the argument above), and its
+        // watermark is the equal-epoch tiebreak. If it cannot be read right now, SKIP this tick rather
+        // than compare against a phantom watermark of 0 — a transient loopback miss must never cause
+        // a false step-down that would forfeit our newer writes to a same-epoch peer.
+        const self = await whoami(loop, 1000);
+        if (!self || role !== 'leader' || child !== myChild) return;
+        const peer = await resolveFull({ token, skipLoopback: true, skipSelf: true });
+        if (role !== 'leader' || child !== myChild) return;
+        const me = { epoch, watermark: self.watermark ?? 0, host: HOST, hostId: HOST_ID, electing: !!self.electing };
+        if (peer && outranks(peer, me)) {
+          log(`peer ${peer.host} (epoch ${peer.epoch}, watermark ${peer.watermark ?? 0}${peer.electing ? ', electing' : ''}) outranks me ` +
+              `(${HOST} epoch ${epoch}, watermark ${me.watermark}${me.electing ? ', term not yet open — no write was acknowledged' : ''}) → stepping down to CLIENT`);
+          stepDownNow();
+          return;
+        }
+        if (me.electing) {
+          const r = await fetch(loop + '/cc/open', { method: 'POST', headers: { Authorization: adminBearer(token) }, signal: AbortSignal.timeout(3000) }).catch(() => null);
+          if (r?.ok) {
+            log(`term ${epoch} confirmed (${peer ? `${peer.host} epoch ${peer.epoch}${peer.electing ? ' electing' : ''} does not outrank me` : 'no other leader'}) → open for writes`);
+            beat();   // re-register at once: the registration made while electing was refused
+          }   // else: the next tick retries
+        }
+      } finally { checking = false; }
+    };
+    monitorIv = setInterval(leadershipCheck, 5000);
+    // The first check runs the moment our server answers — not a tick later: until it does, the
+    // bus is read-only (clients ride the 503 electing out, see cc-retry).
+    waitFor(loop, (w) => w.epoch === epoch, 15000, 150).then((w) => { if (w) leadershipCheck(); });
+
+    function stepDownNow() {
+      if (monitorIv) { clearInterval(monitorIv); monitorIv = null; }
+      steppingDown = true;
+      // Watchdog (#34): the stepdown REQUEST is not the stepdown. If the child has not exited
+      // shortly after the POST (a wedged close, a hung event loop), escalate: kill, then SIGKILL.
+      // Without this, a stepdown that never completed left the supervisor 'leader' forever with
+      // no listener — the exact wedge of the 3.3.2 rollout. child.on('exit') clears the flags.
+      const c = myChild;
+      const watchdog = setTimeout(() => {
+        if (c.exitCode === null && c.signalCode === null) { log('stepdown watchdog: server still alive 5s after /cc/stepdown → kill()'); try { c.kill(); } catch {} }
+        setTimeout(() => {
+          if (c.exitCode === null && c.signalCode === null) { log('stepdown watchdog: still alive → SIGKILL'); try { c.kill('SIGKILL'); } catch {} }
+        }, 5000).unref?.();
+      }, 5000);
+      watchdog.unref?.();
+      fetch(loop + '/cc/stepdown', { method: 'POST', headers: { Authorization: adminBearer(token) } }).catch(() => { try { c.kill(); } catch {} });
+    }
   }
 
   // Client cadence (issue 43). Failover detection and the replica pull used to share ONE fixed 15s
@@ -576,13 +613,25 @@ async function cmdStart() {
   // the same epoch — and the loser's writes are dropped with no epoch change for receivers to
   // notice. Behave like the ex-leader we replace: join, but do not elect, for the holdoff.
   let startHoldoffMs = Math.max(0, parseInt(process.env.CC_START_HOLDOFF_MS) || 0);
+  let coldStart = true;   // the first election this supervisor runs
   async function electAndRun() {
-    const leader = await resolveFull({ token });   // any live bus, incl. this box's loopback
-    if (!leader && startHoldoffMs) { const h = startHoldoffMs; startHoldoffMs = 0; log(`started after a drained handover → holding off elections for ${Math.round(h / 1000)}s`); return runClient({ holdoffMs: h }); }
+    let leader = await resolveFull({ token });   // any live bus, incl. this box's loopback
+    if (!leader && startHoldoffMs) { const h = startHoldoffMs; startHoldoffMs = 0; coldStart = false; log(`started after a drained handover → holding off elections for ${Math.round(h / 1000)}s`); return runClient({ holdoffMs: h }); }
     // (The replica usually wins that race and already leads: say so, so the log always shows the
     // handover's holdoff arrived — handover.test asserts one of these two lines, issue 53.)
     if (leader && startHoldoffMs) log(`started after a drained handover → ${leader.host} already leads, joining it (no holdoff needed)`);
     startHoldoffMs = 0;
+    // Issue 48: supervisors started together (a power cut, a fleet-wide upgrade, two laptops opened
+    // at once) all find nobody. Before promoting, wait a stable per-host delay and look again, so
+    // usually one promotes and the others find it. Only an optimisation — correctness is the
+    // electing gate in becomeLeader, which also settles a spread too narrow to separate two hosts.
+    if (!leader && coldStart && COLD_START_JITTER_MS > 0) {
+      const wait = hostJitterMs(COLD_START_JITTER_MS);
+      log(`no bus found at start-up → looking again in ${wait} ms before electing (staggered cold start)`);
+      await sleep(wait);
+      leader = await resolveFull({ token });
+    }
+    coldStart = false;
     if (leader) {
       cacheLeader(leader);
       currentEpoch = leader.epoch ?? currentEpoch;

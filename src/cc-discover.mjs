@@ -194,6 +194,7 @@ export async function whoami(base, timeoutMs = 1500, token = undefined) {
       rev: j.rev || null, dirty: !!j.dirty,
       watermark: typeof j.watermark === 'number' ? j.watermark : 0,
       draining: !!j.draining,   // the leader is in a drain stepdown (read-only, about to leave)
+      electing: j.electing === true,   // an unconfirmed term (read-only until its supervisor opens it; issue 48)
       proven: proven === true,  // false for an unproven responder accepted in legacy mode / by an unenrolled caller
     };
   } catch { return null; }
@@ -202,6 +203,9 @@ export async function whoami(base, timeoutMs = 1500, token = undefined) {
 // Election ordering, single source of truth (used by pickAuthoritative here AND cc-bus's
 // leader-monitor step-down, so they can never disagree and split-brain):
 //   1. HIGHEST election epoch          — the term authority; a migration always bumps it.
+//   1b. then an OPEN term beats an ELECTING one — issue 48: a leader that already acknowledges
+//                                        writes must never be the one that yields to an equal-epoch
+//                                        rival that has acknowledged none (its writes would be lost).
 //   2. then HIGHEST watermark          — #7: among standbys forked from a common snapshot and
 //                                        racing to promote at the SAME epoch, the branch that
 //                                        took the most writes (highest message id) wins, so a
@@ -216,6 +220,7 @@ export function outranks(a, b) {
   if (!b) return !!a;
   if (!a) return false;
   if (a.epoch !== b.epoch) return a.epoch > b.epoch;
+  if (!!a.electing !== !!b.electing) return !a.electing;
   const aw = a.watermark ?? 0, bw = b.watermark ?? 0;
   if (aw !== bw) return aw > bw;
   // Deterministic final tie-break (#39): canonicalize both host ids (lowercase slug — the same

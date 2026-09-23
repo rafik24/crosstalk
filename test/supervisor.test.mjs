@@ -160,6 +160,14 @@ try {
     ok(outranks(at('z-box'), at('ABox')) === false, '#39: …and the ordering is antisymmetric');
     ok(outranks(at('RAF-MS-7E59'), at('raf-ms-7e59')) === false && outranks(at('raf-ms-7e59'), at('RAF-MS-7E59')) === false,
       '#39: the same host spelled two ways is a true tie — neither outranks the other');
+    // Issue 48: at an EQUAL epoch an open term beats an unconfirmed (electing) one — whatever the
+    // host order or watermark says — so a leader that already acknowledges writes is never the one
+    // that yields. A higher epoch still wins outright (a stale open leader yields to a new term).
+    ok(outranks({ epoch: 1, watermark: 0, host: 'zz' }, { epoch: 1, watermark: 9, host: 'aa', electing: true }) === true
+      && outranks({ epoch: 1, watermark: 9, host: 'aa', electing: true }, { epoch: 1, watermark: 0, host: 'zz' }) === false,
+    '#48: equal epoch — the OPEN leader outranks an electing one (host + watermark notwithstanding)');
+    ok(outranks({ epoch: 2, watermark: 0, host: 'zz', electing: true }, { epoch: 1, watermark: 9, host: 'aa' }) === true,
+      '#48: a higher-epoch electing term still outranks an older open one');
   }
 
   // --- a pull that OUTLIVES its role must not touch the disk; the epoch file is monotonic -------

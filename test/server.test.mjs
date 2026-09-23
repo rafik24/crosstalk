@@ -504,6 +504,53 @@ async function main() {
     console.log('server.test: PASS (drain stepdown: admin-only, no-replica degrade, in-flight write blocks the final pull, 503+Retry-After, deadline, one release marker)');
   }
 
+  // ---- Electing (issue 48): a fresh leader is read-only until its supervisor confirms the term --
+  // Every leader that ever acknowledged a write it later lost did so in the seconds between
+  // promoting and discovering an equal-epoch rival. The server now starts READ-ONLY when asked
+  // (the supervisor does, on every promotion) and opens only on an admin POST /cc/open.
+  {
+    const ADMIN = 'admin-elect-xyz';
+    const app = await startServer({
+      port: 8835, apiKey: TOKEN, adminKey: ADMIN, host: 'x', hostId: '0badc0de', epoch: 1, electing: true,
+      createDB: createStubDB, createRestRouter: createStubRouter, log: () => {},
+    });
+    const B = 'http://127.0.0.1:8835';
+    const chat = { Authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    try {
+      let w = await (await fetch(`${B}/cc/whoami`)).json();
+      assert.equal(w.electing, true, 'whoami advertises an unconfirmed (electing) term');
+      assert.equal(w.host_id, '0badc0de', 'whoami advertises the collision-safe host id (issue 49)');
+      let r = await fetch(`${B}/api/work`, { method: 'POST', headers: chat, body: JSON.stringify({ title: 'too early' }) });
+      assert.equal(r.status, 503, 'a write to an ELECTING leader is refused, never acknowledged');
+      assert.equal((await r.json()).reason, 'electing'); assert.ok(r.headers.get('retry-after'), 'with a Retry-After');
+      assert.equal((await fetch(`${B}/api/instances`, { headers: chat })).status, 200, 'reads work while electing');
+      r = await fetch(`${B}/cc/open`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` } });
+      assert.equal(r.status, 401, 'the chat token cannot open a term');
+      r = await fetch(`${B}/cc/open`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}` } });
+      assert.equal(r.status, 200, 'the admin key opens the term');
+      w = await (await fetch(`${B}/cc/whoami`)).json();
+      assert.ok(!w.electing, 'whoami no longer says electing');
+      r = await fetch(`${B}/api/work`, { method: 'POST', headers: chat, body: JSON.stringify({ title: 'now' }) });
+      assert.ok(r.ok, `writes are accepted once the term is open (got ${r.status})`);
+    } finally { await app.close(); }
+
+    // A client rides the electing window out exactly as it rides a drain (cc-retry).
+    const { throughDrain } = await import('../src/cc-retry.mjs');
+    const app2 = await startServer({
+      port: 8836, apiKey: TOKEN, adminKey: ADMIN, host: 'x', epoch: 1, electing: true,
+      createDB: createStubDB, createRestRouter: createStubRouter, log: () => {},
+    });
+    const B2 = 'http://127.0.0.1:8836';
+    try {
+      setTimeout(() => { fetch(`${B2}/cc/open`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}` } }).catch(() => {}); }, 1200);
+      let saw = '';
+      const r = await throughDrain(() => fetch(`${B2}/api/work`, { method: 'POST', headers: chat, body: JSON.stringify({ title: 'rode it' }) }), async () => {}, { log: (l) => { saw += l; } });
+      assert.ok(r.ok, `throughDrain rode a 503 electing out to a 200 (got ${r.status})`);
+      assert.match(saw, /electing/, 'and said why it waited');
+    } finally { await app2.close(); }
+    console.log('server.test: PASS (electing: read-only until an admin /cc/open, whoami flag + host_id, clients ride it out)');
+  }
+
   // ---- Admin scope (H2): export/stepdown reject the chat token when CC_ADMIN_KEY set ----
   {
     const ADMIN = 'admin-secret-xyz';

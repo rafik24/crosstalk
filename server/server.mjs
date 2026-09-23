@@ -58,6 +58,9 @@ function resolveConfig(opts = {}) {
     // Collision-safe host identity (issue 49) — the supervisor passes its own; advertised in whoami
     // so peers compare machines on it rather than on the (colliding) canonical slug. Unset ⇒ omitted.
     hostId: (opts.hostId ?? env.CC_HOST_ID) || null,
+    // Start READ-ONLY until the supervisor confirms the term (issue 48): POST /cc/open. The supervisor
+    // sets CC_ELECTING=1 on every promotion; a server started any other way is open at once.
+    electing: opts.electing === true || env.CC_ELECTING === '1',
     // Where the .stepdown marker lands (issue #34); the supervisor passes CC_DATA_DIR. Unset ⇒ no marker.
     dataDir: opts.dataDir ?? env.CC_DATA_DIR ?? null,
     // /cc/stepdown ends the PROCESS (not just the listener) — true for a real spawned server; tests
@@ -246,8 +249,17 @@ export async function startServer(opts = {}) {
   let lastExportAt = 0;
   let releasing = false;
   let finishDrain = () => {};
+  // electing (issue 48): this term is not yet confirmed. Two supervisors that found nobody promote
+  // together (a cold start, a raced failover); until ours has scanned AFTER we were listening and
+  // found no rival that outranks us, a write we acknowledged could belong to the LOSING term and be
+  // dropped with it. Refused with the same retryable 503 a drain uses, so clients just wait.
+  let electing = config.electing;
   function drainGuard(req, res, next) {
     if (req.method === 'GET' || req.method === 'HEAD') return next();
+    if (electing) {
+      res.set('Retry-After', '2');
+      return res.status(503).json({ error: 'the bus leader is confirming its election; retry shortly', reason: 'electing' });
+    }
     if (draining) {
       res.set('Retry-After', '5');
       return res.status(503).json({ error: 'the bus leader is draining for a stepdown; retry shortly', reason: 'draining' });
@@ -288,7 +300,8 @@ export async function startServer(opts = {}) {
       watermark, rev: code.rev, dirty: code.dirty,
       version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
       ...(draining ? { draining: true } : {}),   // a drain stepdown is in progress (issue 43)
-      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort, { hostId: config.hostId }) } : {}),
+      ...(electing ? { electing: true } : {}),   // an unconfirmed term: read-only, yields to an open one (issue 48)
+      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort, { hostId: config.hostId, electing }) } : {}),
     });
   });
 
@@ -440,6 +453,14 @@ export async function startServer(opts = {}) {
       }
     }, 50);
   }
+
+  // The supervisor confirmed this term (issue 48): no rival outranks it → accept writes from now on.
+  app.post('/cc/open', requireAdmin, (_req, res) => {
+    const opened = electing;
+    electing = false;
+    if (opened) log('[election] term confirmed by the supervisor → open for writes');
+    res.json({ ok: true, opened });
+  });
 
   // `?drain=1` (issue 43) = the LOSS-FREE form: go read-only, leave once a replica holds the final
   // snapshot, or at CC_DRAIN_MS (default 20s ≥ one 15s replica tick) if none shows up. With no

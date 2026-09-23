@@ -11,27 +11,30 @@
 //
 // `request` is called again after `relocate` has had the chance to move BASE. Only a 503 whose body
 // says reason:'draining' is retried (a rate-limit 429, a 5xx fault or a plain 503 are the caller's
-// to handle), at most `tries` times, waiting Retry-After (capped) each time; a connection error
-// AFTER a drain was seen means "between leaders" and is retried too. Zero deps.
+// to handle) — or reason:'electing' (issue 48: a freshly promoted leader, read-only for the second or
+// two until its supervisor confirms no rival outranks it) — at most `tries` times, waiting
+// Retry-After (capped) each time; a connection error AFTER a drain was seen means "between
+// leaders" and is retried too. Zero deps.
 // ---------------------------------------------------------------------------
 const MAX_WAIT_MS = 8000;
 
 export async function throughDrain(request, relocate, { tries = 5, log = null } = {}) {
   if (tries === undefined) tries = 5;   // ≈ the server's 20s drain deadline
   let r = await request();
-  let sawDrain = false;
+  let sawDrain = false, why = 'draining';
   for (let i = 0; i < tries; i++) {
     let wait;
     if (r && r.status === 503) {
       let body = null;
       try { body = await r.clone().json(); } catch {}
-      if (body?.reason !== 'draining') break;
+      if (body?.reason !== 'draining' && body?.reason !== 'electing') break;
       sawDrain = true;
+      why = body.reason;
       wait = Math.min(MAX_WAIT_MS, Math.max(1, parseInt(r.headers.get('retry-after')) || 5) * 1000);
     } else if (!r) {
       wait = 2000;            // the drained leader has LEFT and its successor is not up yet
     } else break;
-    if (log) log(`[bus leader is handing over (draining) — retrying in ${wait / 1000}s]`);
+    if (log) log(why === 'electing' ? `[bus leader is confirming its election (electing) — retrying in ${wait / 1000}s]` : `[bus leader is handing over (draining) — retrying in ${wait / 1000}s]`);
     await new Promise((res) => setTimeout(res, wait));
     try { await relocate(); } catch {}
     // Once a drain was seen, a connection error only means "between leaders" — keep going. Before
