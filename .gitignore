@@ -17,3 +17,6 @@ node_modules/
 
 # Scratch copies of the repo made by test/handover.test.mjs (two versions side by side).
 .qa-scratch/
+evals/results/*.json
+evals/results/2026-*/
+evals/results/bus-*.log
