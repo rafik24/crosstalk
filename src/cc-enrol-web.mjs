@@ -93,8 +93,11 @@ async function enrol(path, host, req) {
     leader = v.leader;
   }
   const autoSupervisor = (action === 'join' || action === 'setup') && req.autoSupervisor !== false;
-  // Set up: "let other machines on this network join" (default on) → CC_BIND=0.0.0.0 (#60).
-  const lan = action === 'setup' && req.lan !== false;
+  // CC_BIND=0.0.0.0 (#60). Set up: its own "let other machines on this network join" box (default
+  // on). Join: follows "host the bus when needed" — a machine that may host must be reachable, one
+  // that never hosts needs no bind. Re-enrol / set-password: undefined → writeEnrolment derives it
+  // from the file's existing CC_AUTO_SUPERVISOR. An existing CC_BIND is never overridden.
+  const lan = action === 'setup' ? req.lan !== false : action === 'join' ? autoSupervisor : undefined;
   writeEnrolment(path, { token, admin, autoSupervisor, lan, rewrite: action === 'set-password' || action === 're-enrol' });
 
   const bus = join(HERE, 'cc-bus.mjs').replace(/\\/g, '/');

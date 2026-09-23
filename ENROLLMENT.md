@@ -109,7 +109,11 @@ config sets `CC_BIND`, so Set up's **"Let other machines on this network join"**
 terminal: `--lan`) writes `CC_BIND=0.0.0.0`, the setting the existing estate uses. That exposure is
 authenticated both ways: every request needs the estate token, and discovery only adopts a leader
 that proves it holds it. Untick it for a single-machine estate (no `CC_BIND`: loopback only); you
-can add `CC_BIND=0.0.0.0` later and restart the supervisor.
+can add `CC_BIND=0.0.0.0` later and restart the supervisor. The same holds for **every machine
+that may host**: a failover must never land on a loopback-only leader. So Join's "Let this machine
+host the bus when needed" (terminal: `--auto-supervisor`, opt out with `--no-lan`) also writes
+`CC_BIND=0.0.0.0`, and so does a re-enrol of a machine whose config has `CC_AUTO_SUPERVISOR=1`. A
+machine that never hosts gets none, and an existing `CC_BIND` (say, a tailnet IP) is never replaced.
 
 **Headless / SSH: the terminal fallback.** The same core, with a hidden prompt:
 
@@ -295,6 +299,19 @@ Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load 
 > window and will **not** catch up on reload. Do not assume a Codex peer has seen a `»HANDOFF«` it
 > never `ack`ed — re-send, or confirm via `cc-codex.mjs peers`. (Rolling the cursor back was
 > rejected: it would re-queue every later message forever — a worse failure.)
+
+## Upgrading to 3.3.5
+
+- **The listen-gate goes live on password-enrolled machines.** Before 3.3.5 it only gated a machine
+  whose config pinned `CC_BASE`; a discovery or password enrolment has none, so the gate allowed
+  everything there. Now any config with a `CC_TOKEN` is gated: a session that has not armed
+  `cc-ws` is blocked from editing. Without `CC_ESTATE` in the config, that means **every file** it
+  edits. Set `CC_ESTATE=<your projects dir>` to scope it.
+- **A machine that may host must be reachable.** New enrolments with the auto-supervisor on write
+  `CC_BIND=0.0.0.0` (§3). An already-enrolled machine is not changed until it re-enrols, so check
+  that every box with `CC_AUTO_SUPERVISOR=1` also has a `CC_BIND`.
+- **Discovery is authenticated.** During the rollout sitting, set `CC_DISCOVERY_PROOF=legacy` while
+  a pre-3.3.5 leader still serves, and remove it the same sitting (see Troubleshooting).
 
 ## Troubleshooting
 

@@ -20,7 +20,8 @@
 //   W12 no response body ever carried a password or a derived key
 //   W13 the join hook points an unenrolled machine at /crosstalk:enrol
 //   W14 Set up's "let other machines join" → CC_BIND=0.0.0.0 (default on); unticked → none (#60)
-//   W15 the CLI's --lan does the same on the --no-verify path (#60)
+//   W15 CLI: CC_BIND follows hosting (--auto-supervisor implies --lan unless --no-lan; join, --re-enrol, existing bind kept)
+//   W16 page Join/Re-enrol: host ticked → CC_BIND; unticked → none; an existing CC_BIND is kept (#60)
 // ---------------------------------------------------------------------------
 import http from 'node:http';
 import net from 'node:net';
@@ -188,6 +189,7 @@ try {
     ok(r.status === 200 && r.json?.ok && /Enrolled ✓ as testbox/.test(r.json.message) && r.json.leader?.host === 'leaderhost', `200 Enrolled ✓, verified by leaderhost (${r.status} ${r.json?.message?.slice(0, 40)})`);
     const written = existsSync(s.config) ? readFileSync(s.config, 'utf8') : '';
     ok(written.includes(`CC_TOKEN=${KEYS.token}\n`) && written.includes(`CC_ADMIN_KEY=${KEYS.admin}\n`) && written.includes('CC_AUTO_SUPERVISOR=1'), 'config holds exactly deriveKeys()’ token + admin key, + the auto-supervisor opt-in');
+    ok(/^CC_BIND=0\.0\.0\.0$/m.test(written), 'host ticked → CC_BIND=0.0.0.0 (a machine that may host must be reachable, #60)');
     ok(!written.includes(PW), 'the password itself is not in the file');
     if (process.platform !== 'win32') ok((statSync(s.config).mode & 0o777) === 0o600, 'config is mode 600');
     else console.log('  – mode 600 not checkable on Windows (POSIX permission bits)');
@@ -273,18 +275,51 @@ try {
     ok(/^CC_BIND=0\.0\.0\.0$/m.test(dflt.text), 'not sent → defaults ON (CC_BIND=0.0.0.0)');
   }
 
-  console.log('W15 CLI: cc-enrol --no-verify --lan writes CC_BIND=0.0.0.0; without --lan none (#60)');
+  console.log('W15 CLI: CC_BIND follows hosting — --auto-supervisor implies --lan unless --no-lan (#60)');
   {
     const ENROL = join(__dirname, '..', 'src', 'cc-enrol.mjs');
-    const cli = (name, extra) => {
+    const BIND = /^CC_BIND=0\.0\.0\.0$/m;
+    const cli = (name, extra, { pre, peers = `127.0.0.1:${DEAD}` } = {}) => {
       const config = join(SCRATCH, name);
-      const r = spawnSync(process.execPath, [ENROL, '--config', config, '--no-verify', '--auto-supervisor', ...extra], { encoding: 'utf8', timeout: 30000, env: { ...process.env, CC_ENROL_PASSWORD_FOR_TESTS: PW } });
+      if (pre !== undefined) writeFileSync(config, pre);
+      const r = spawnSync(process.execPath, [ENROL, '--config', config, ...extra], { encoding: 'utf8', timeout: 30000, env: { ...process.env, CC_PEERS: peers, CC_ENROL_PASSWORD_FOR_TESTS: PW } });
       return { status: r.status, text: existsSync(config) ? readFileSync(config, 'utf8') : '' };
     };
-    const withLan = cli('w15-lan', ['--lan']);
-    ok(withLan.status === 0 && /^CC_BIND=0\.0\.0\.0$/m.test(withLan.text) && withLan.text.includes(`CC_TOKEN=${KEYS.token}`), '--lan → CC_BIND=0.0.0.0 alongside the derived keys');
-    const without = cli('w15-plain', []);
-    ok(without.status === 0 && without.text.includes(`CC_TOKEN=${KEYS.token}`) && !/CC_BIND/.test(without.text), 'no --lan → no CC_BIND');
+    // --no-verify path (first box of a new estate)
+    const nv = cli('w15-nv-lan', ['--no-verify', '--lan']);
+    ok(nv.status === 0 && BIND.test(nv.text) && nv.text.includes(`CC_TOKEN=${KEYS.token}`), '--no-verify --lan → CC_BIND=0.0.0.0 alongside the derived keys');
+    ok(BIND.test(cli('w15-nv-auto', ['--no-verify', '--auto-supervisor']).text), '--no-verify --auto-supervisor → CC_BIND=0.0.0.0 (hosting implies reachable)');
+    const nvNo = cli('w15-nv-nolan', ['--no-verify', '--auto-supervisor', '--no-lan']);
+    ok(nvNo.status === 0 && /CC_AUTO_SUPERVISOR=1/.test(nvNo.text) && !/CC_BIND/.test(nvNo.text), '--auto-supervisor --no-lan → no CC_BIND');
+    ok(!/CC_BIND/.test(cli('w15-nv-plain', ['--no-verify']).text), 'neither flag (never hosts) → no CC_BIND');
+    // JOIN path (verified against the real leader)
+    const jn = cli('w15-join-auto', ['--auto-supervisor'], { peers: `127.0.0.1:${LEADER}` });
+    ok(jn.status === 0 && BIND.test(jn.text), `join --auto-supervisor → CC_BIND=0.0.0.0 (${jn.status})`);
+    const jp = cli('w15-join-plain', [], { peers: `127.0.0.1:${LEADER}` });
+    ok(jp.status === 0 && !/CC_BIND/.test(jp.text), `join without --auto-supervisor → no CC_BIND (${jp.status})`);
+    // --re-enrol keeps the file's settings: auto-supervisor on → bind added; an existing bind wins
+    const re = cli('w15-re-auto', ['--re-enrol'], { pre: 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\n', peers: `127.0.0.1:${LEADER}` });
+    ok(re.status === 0 && BIND.test(re.text), '--re-enrol on a hosting box (CC_AUTO_SUPERVISOR=1 in the file) → CC_BIND=0.0.0.0 added');
+    const rk = cli('w15-re-keep', ['--re-enrol'], { pre: 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\nCC_BIND=100.64.0.9\n', peers: `127.0.0.1:${LEADER}` });
+    ok(rk.status === 0 && /^CC_BIND=100\.64\.0\.9$/m.test(rk.text) && (rk.text.match(/CC_BIND/g) || []).length === 1, '--re-enrol keeps an existing CC_BIND=100.64.0.9 (never overridden)');
+  }
+
+  console.log('W16 page Join: "host the bus when needed" implies reachable (#60)');
+  {
+    const BIND = /^CC_BIND=0\.0\.0\.0$/m;
+    const join1 = async (name, body, pre) => {
+      if (pre !== undefined) writeFileSync(join(SCRATCH, name), pre);
+      const s = await start(name, { CC_PEERS: `127.0.0.1:${LEADER}` });
+      const r = await post(s, 'enrol', { password: PW, ...body });
+      await within(s.exited, 3000);
+      return { status: r.status, text: existsSync(s.config) ? readFileSync(s.config, 'utf8') : '' };
+    };
+    const off = await join1('w16-off', { action: 'join', autoSupervisor: false });
+    ok(off.status === 200 && !/CC_BIND/.test(off.text) && !/CC_AUTO_SUPERVISOR/.test(off.text), 'Join with host unticked → no CC_BIND, no auto-supervisor (it never hosts)');
+    const keep = await join1('w16-keep', { action: 're-enrol' }, 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\nCC_BIND=100.64.0.9\n');
+    ok(keep.status === 200 && /^CC_BIND=100\.64\.0\.9$/m.test(keep.text) && !BIND.test(keep.text), 'Re-enrol on a hosting box keeps its existing CC_BIND');
+    const add = await join1('w16-add', { action: 're-enrol' }, 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\n');
+    ok(add.status === 200 && BIND.test(add.text), 'Re-enrol on a hosting box with no CC_BIND → CC_BIND=0.0.0.0 added');
   }
 
   console.log('W12 no response ever carried a secret');

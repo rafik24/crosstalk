@@ -88,7 +88,8 @@
       <label for="join-pw">Estate password</label>
       <input id="join-pw" name="password" type="password" autocomplete="current-password" required>
       <label class="check"><input type="checkbox" name="show"> Show password</label>
-      <label class="check"><input type="checkbox" name="autoSupervisor" checked> Let this machine host the bus when needed (auto-supervisor — recommended)</label>
+      <label class="check"><input type="checkbox" name="autoSupervisor" checked aria-describedby="join-host-hint"> Let this machine host the bus when needed (auto-supervisor — recommended)</label>
+      <p id="join-host-hint" class="muted">Hosting means your other machines must reach this one, so its bus then listens on the network (still key-protected; machines only trust a bus that proves it holds the estate key). Untick and this machine only ever connects.</p>
       <div class="row"><button class="primary" type="submit">Join</button></div>
       <p class="muted">Nothing is saved unless a machine in your estate proves it knows this password.</p>
     </form>

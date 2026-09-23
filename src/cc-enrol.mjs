@@ -12,11 +12,12 @@
 //   node cc-enrol.mjs --token <tok>   the pre-3.3.5 way: write a raw token, no derivation (≥32 chars)
 //   options: --auto-supervisor  (also set CC_AUTO_SUPERVISOR=1)   --no-verify  (write without
 //            finding a leader — for the FIRST box of a brand-new estate)   --config <path>
-//            --lan  (also set CC_BIND=0.0.0.0, so other machines can reach this box's bus when it
-//            hosts — the first box of a new estate needs it, or its bus binds loopback only (#60))
+//            --lan / --no-lan  (CC_BIND=0.0.0.0 or not, so other machines can reach this box's bus
+//            when it hosts). Default: on whenever the auto-supervisor is (a box that may host must
+//            be reachable, or a failover strands the estate — #60); an existing CC_BIND is kept
 //
 // The usual way in is the browser page (/crosstalk:enrol → cc-enrol-web.mjs), which calls the
-// exported core below; this CLI is the headless/SSH fallback and behaves exactly as before.
+// exported core below; this CLI is the headless/SSH fallback (same core, same rules).
 //
 // The password is never stored. Both estate secrets are derived from it with scrypt and fixed,
 // public salts, so every box that knows the password derives the SAME CC_TOKEN / CC_ADMIN_KEY —
@@ -100,20 +101,25 @@ export async function verifyToken(token) {
 // Write the enrolment. rewrite=true (set-password / re-enrol) keeps every line of the existing
 // file except the two keys; a fresh enrolment writes just the keys (+ the supervisor opt-in).
 const ENROLMENT_HEADER = '# Crosstalk bus — per-machine enrolment (written by cc-enrol; keys derived from the estate password, never the password itself)';
-// lan=true adds CC_BIND=0.0.0.0 (unless the file already sets a CC_BIND): the bus this box hosts
-// then listens beyond loopback. Every request still needs the estate token, and a client only
-// adopts a leader that proves it holds that token (cc-proof).
-export function writeEnrolment(path, { token, admin, autoSupervisor = false, lan = false, rewrite = false }) {
+// CC_BIND=0.0.0.0 makes the bus this box hosts listen beyond loopback. Every request still needs
+// the estate token, and a client only adopts a leader that proves it holds that token (cc-proof).
+// lan: true / false decides explicitly. Left undefined, it follows hosting: a box whose file turns
+// the auto-supervisor on MAY become the leader on failover, and a loopback-only leader strands
+// every other machine (#60) — so it gets CC_BIND=0.0.0.0; a box that never hosts gets none.
+// An existing CC_BIND is never overridden (e.g. a tailnet IP chosen by hand).
+const setsAutoSupervisor = (l) => /^\s*(export\s+)?CC_AUTO_SUPERVISOR\s*=\s*["']?1["']?\s*$/.test(l);
+export function writeEnrolment(path, { token, admin, autoSupervisor = false, lan, rewrite = false }) {
   const keep = [];
   if (rewrite) {   // our own header is re-emitted below — keeping it too stacked one copy per rewrite
     for (const l of readFileSync(path, 'utf8').split(/\r?\n/)) if (l.trim() && l !== ENROLMENT_HEADER && !/^\s*(export\s+)?CC_(TOKEN|ADMIN_KEY)\s*=/.test(l)) keep.push(l);
   }
+  const bind = lan ?? (autoSupervisor || keep.some(setsAutoSupervisor));
   writeConfig(path, [
     ENROLMENT_HEADER,
     `CC_TOKEN=${token}`,
     ...(admin ? [`CC_ADMIN_KEY=${admin}`] : []),
     ...(autoSupervisor && !keep.some((l) => /CC_AUTO_SUPERVISOR/.test(l)) ? ['CC_AUTO_SUPERVISOR=1'] : []),
-    ...(lan && !keep.some((l) => /^\s*(export\s+)?CC_BIND\s*=/.test(l)) ? ['CC_BIND=0.0.0.0'] : []),
+    ...(bind && !keep.some((l) => /^\s*(export\s+)?CC_BIND\s*=/.test(l)) ? ['CC_BIND=0.0.0.0'] : []),
     ...keep,
   ]);
 }
@@ -146,7 +152,7 @@ async function main() {
     }
   }
 
-  writeEnrolment(path, { token, admin, autoSupervisor: has('--auto-supervisor'), lan: has('--lan'), rewrite: setPw || reEnrol });
+  writeEnrolment(path, { token, admin, autoSupervisor: has('--auto-supervisor'), lan: has('--lan') ? true : has('--no-lan') ? false : undefined, rewrite: setPw || reEnrol });
   if (setPw) console.log(`estate password set — this box now uses the derived keys: ${path}\n⚠️  ${SPLIT_WARNING.replace('re-enrols', 'runs `cc-enrol --re-enrol`')}`);
   else console.log(`${reEnrol ? 're-enrolled with the new keys' : 'enrolled'}: ${path}\n${reEnrol ? 'restart the bus supervisor on this box' : 'start a Claude session — the join hook does the rest'}`);
 }

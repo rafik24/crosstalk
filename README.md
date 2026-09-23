@@ -99,7 +99,9 @@ says: *"Crosstalk isn't set up on this machine — type /crosstalk:enrol"*. Type
 command that opens a local page in your browser (`127.0.0.1`, one-time link), and the page picks the
 right form for this machine:
 
-- **Join your estate** — an estate answered on the network: enter its password.
+- **Join your estate** — an estate answered on the network: enter its password. "Let this machine
+  host the bus when needed" (default on) also makes it reachable (`CC_BIND=0.0.0.0`), so a
+  failover never lands on a loopback-only leader; terminal: `--auto-supervisor` (`--no-lan` to opt out).
 - **Set up a new estate** — nothing answered: choose a password (≥16 chars, confirmed). "Let other
   machines on this network join" (default on) writes `CC_BIND=0.0.0.0` so the others can reach this
   machine's bus — still token-authenticated, with proof-authenticated discovery. If you
