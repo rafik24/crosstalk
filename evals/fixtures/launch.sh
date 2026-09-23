@@ -16,14 +16,16 @@ if [ -f "$RESULTS/evalbus.pid" ]; then
   [ -n "$old" ] && { taskkill //PID "$old" //F >/dev/null 2>&1 || kill "$old" 2>/dev/null || true; }
   rm -f "$RESULTS/evalbus.pid"; sleep 1
 fi
-command -v cygpath >/dev/null 2>&1 && { HERE="$(cygpath -m "$HERE")"; RESULTS="$(cygpath -m "$RESULTS")"; RUN_HOME="$(cygpath -m "$RUN_HOME")"; }
+# The graded ground truth goes in the run's WORKSPACE (= our cwd): regex graders read files there.
+TRUTH="$PWD/crosstalk-bus-truth.log"; : > "$TRUTH"
+command -v cygpath >/dev/null 2>&1 && { HERE="$(cygpath -m "$HERE")"; RESULTS="$(cygpath -m "$RESULTS")"; RUN_HOME="$(cygpath -m "$RUN_HOME")"; TRUTH="$(cygpath -m "$TRUTH")"; }
 node -e '
   const { spawn } = require("node:child_process"); const fs = require("node:fs");
   const [script, port, home, results, ...rest] = process.argv.slice(1);
   const out = fs.openSync(results + "/evalbus-" + port + ".out", "a");
   const c = spawn(process.execPath, [script, "--port", port, "--home", home, "--results", results, "--ttl-s", "600", ...rest], { detached: true, stdio: ["ignore", out, out], windowsHide: true });
   c.unref(); console.log("spawned evalbus pid " + c.pid);
-' "$HERE/evalbus.mjs" "$PORT" "$RUN_HOME" "$RESULTS" "$@"
+' "$HERE/evalbus.mjs" "$PORT" "$RUN_HOME" "$RESULTS" --truth "$TRUTH" "$@"
 for i in $(seq 1 40); do
   curl -s -m 2 "http://127.0.0.1:$PORT/cc/whoami" | grep -q '"evalbus"' && { echo "evalbus ready on :$PORT (config $RUN_HOME/.claude/.crosstalk)"; exit 0; }
   sleep 0.5
