@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
 import { revString, pkgVersion } from './cc-rev.mjs';
-import { renderLine, wrapForNotification } from './cc-render.mjs';
+import { addressedTo, renderLine, wrapForNotification } from './cc-render.mjs';
 
 const args = process.argv.slice(2);
 const instance = args[0];
@@ -119,11 +119,9 @@ async function tick(seed = false) {
     try { res = await j(`/api/messages/${encodeURIComponent(c.name)}?after_id=${after}`); }
     catch { continue; }
     if (first && seed && !fromStart) { cursors[c.name] = res.last_id || 0; continue; }  // skip backlog on the initial seed only
-    const shortId = instance.split('/').pop();
     for (const m of res.messages.sort((a, b) => a.id - b.id)) {
       cursors[c.name] = Math.max(cursors[c.name] || 0, m.id);
       if (m.sender === instance) continue;  // never echo my own
-      const body = m.content || '';
       // "Addressed to me" = a DM channel to me, or an @mention of my id. By DEFAULT only these WAKE
       // the session — ambient #general chatter between other sessions is SUPPRESSED so it doesn't
       // pollute the terminal. You're still a live listener: register()/beacon keep presence up and
@@ -131,9 +129,9 @@ async function tick(seed = false) {
       // session, DM it or @mention it. Firehose (see FIREHOSE) or the PO console see everything.
       // @all / @here / @everyone is the deliberate broadcast-to-every-session escape hatch: it
       // pierces the addressed-only filter and wakes EVERYONE. Bare chatter still doesn't.
-      const atAll = /(^|\s)@(all|here|everyone)\b/i.test(body);
-      const addressed = atAll || m.channel === `dm-${shortId}` || m.channel.startsWith(`dm-${shortId}`) ||
-        body.includes('@' + instance) || body.includes('@' + shortId);
+      // The SHARED filter (issue #57): a local copy keyed off the raw short name missed the
+      // server-normalized `dm-foo-bar` / `@foo-bar` for a `host/Foo_Bar` session (issue #5 again).
+      const addressed = addressedTo(m, instance);
       if (!FIREHOSE && !addressed) continue;  // ambient, not for me → do not wake
       // renderLine (not a local template) so the tag AND the #51 forged-header marking match every
       // other sink. Wrap long bodies so the Claude Code harness delivers them WHOLE: it truncates a single
