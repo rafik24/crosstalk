@@ -235,9 +235,13 @@ export async function startServer(opts = {}) {
   //                   snapshot only counts as FINAL when this is 0, so a write that raced the
   //                   drain flag can never be acknowledged yet missing from the final snapshot.
   //   lastExportAt    when a replica last pulled — no recent pull ⇒ nobody to drain for.
+  //   releasing       a final pull is being served and WILL release us (issue 52): exactly one
+  //                   replica is told so (x-cc-released) and elects at once; every other replica
+  //                   holds off, so two replicas never promote into the same epoch together.
   let draining = null;
   let inflightWrites = 0;
   let lastExportAt = 0;
+  let releasing = false;
   let finishDrain = () => {};
   function drainGuard(req, res, next) {
     if (req.method === 'GET' || req.method === 'HEAD') return next();
@@ -397,10 +401,16 @@ export async function startServer(opts = {}) {
     }
     lastExportAt = Date.now();
     if (draining) res.set('x-cc-draining', '1');   // tells the replica: I am leaving — follow closely
+    // Only the FIRST final pull releases us, and only it is told so. Concurrent final pulls are just
+    // as complete, but if every one of them carried the marker their replicas would promote into
+    // the same epoch together — the tie issue 52 is about.
+    const releases = finalPull && !releasing;
+    if (releases) { releasing = true; res.set('x-cc-released', '1'); }
     res.download(tmp, 'messages.db', (err) => {
       fs.rm(tmp, { force: true }, () => {});
+      if (err && releases) releasing = false;   // that replica never got it — the next final pull releases
       if (err && !res.headersSent) return next(err);
-      if (!err && finalPull) finishDrain('a replica pulled the final snapshot');
+      if (!err && releases) finishDrain('a replica pulled the final snapshot');
     });
   });
 

@@ -449,12 +449,15 @@ async function main() {
       // A pull NOW — while that earlier write has not finished — must NOT release the leader.
       r = await fetch(`${B}/cc/export`, { headers: admin });
       assert.equal(r.headers.get('x-cc-draining'), '1', 'export during the drain carries x-cc-draining');
+      assert.equal(r.headers.get('x-cc-released'), null, 'a NON-final pull does not claim the release (issue 52)');
       await r.arrayBuffer();
       await new Promise((z) => setTimeout(z, 400));
       assert.ok(await up(B), 'a snapshot taken with a write still in flight is NOT final — the leader stays');
       assert.equal((await slow).status, 200, 'the in-flight write is acknowledged');
       // The next pull sees zero in-flight writes → final → the leader leaves.
-      await (await fetch(`${B}/cc/export`, { headers: admin })).arrayBuffer();
+      r = await fetch(`${B}/cc/export`, { headers: admin });
+      assert.equal(r.headers.get('x-cc-released'), '1', 'the FINAL pull is told it released the leader — that replica elects at once (issue 52)');
+      await r.arrayBuffer();
       let gone = false;
       for (let i = 0; i < 30 && !gone; i++) { await new Promise((z) => setTimeout(z, 100)); gone = !(await up(B)); }
       assert.ok(gone, 'a snapshot taken with nothing in flight IS final — the leader left');
@@ -488,7 +491,17 @@ async function main() {
       await app.close();
       if (savedDrain === undefined) delete process.env.CC_DRAIN_MS; else process.env.CC_DRAIN_MS = savedDrain;
     }
-    console.log('server.test: PASS (drain stepdown: admin-only, no-replica degrade, in-flight write blocks the final pull, 503+Retry-After, deadline)');
+    // (3) issue 52: two replicas pull the final snapshot at the SAME moment — exactly ONE of them
+    // is told it released the leader. Both being told would re-create the same-epoch tie.
+    app = await mk(8834); B = 'http://127.0.0.1:8834';
+    try {
+      await (await fetch(`${B}/cc/export`, { headers: admin })).arrayBuffer();
+      await fetch(`${B}/cc/stepdown?drain=1`, { method: 'POST', headers: admin });
+      const pulls = await Promise.all([0, 1, 2].map(() => fetch(`${B}/cc/export`, { headers: admin }).then(async (x) => { await x.arrayBuffer(); return x; }).catch(() => null)));
+      const released = pulls.filter((x) => x && x.headers.get('x-cc-released') === '1').length;
+      assert.equal(released, 1, `exactly one of three concurrent final pulls carries x-cc-released (got ${released})`);
+    } finally { await app.close(); }
+    console.log('server.test: PASS (drain stepdown: admin-only, no-replica degrade, in-flight write blocks the final pull, 503+Retry-After, deadline, one release marker)');
   }
 
   // ---- Admin scope (H2): export/stepdown reject the chat token when CC_ADMIN_KEY set ----
