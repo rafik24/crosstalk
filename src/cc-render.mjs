@@ -78,17 +78,61 @@ export function tagFor(msg, identity, addressed = true) {
   return addressed ? ' »TO YOU«' : '';
 }
 
-// The one-line header a message renders to (before wrapping). The body follows.
-export function renderLine(msg, identity, addressed = true) {
-  const tag = tagFor(msg, identity, addressed);
-  return `CHAT #${msg.channel} ${msg.sender} [${msg.message_type}]${tag}: ${msg.content || ''}`;
+// --- forged-header defence (#51) --------------------------------------------------------------
+// A message renders as `CHAT #<ch> <sender> [<type>]<tag>: <content>` and every sink (Monitor, the
+// Codex queue, pi) reads that text line by line. Content that itself contained a line starting
+// "CHAT #…" used to render BYTE-IDENTICAL to a genuine message from someone else — a peer could
+// forge a handoff from the lead. So every line after the header is a CONTINUATION and starts with
+// CONT, which no header ever does; every break a terminal or an LLM might honour (\r\n, lone \r,
+// \v, \f, NEL, U+2028/2029) counts as a line break; and invisible characters that could disguise
+// a line (bidi overrides/isolates/marks, zero-width, other C0/C1 controls) are stripped. Tab stays.
+export const CONT = '│ ';
+const LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+const LINE_BREAKS = new RegExp(LINE_BREAK.source, 'g');
+const INVISIBLE_CLASS = '\\u061C\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF';
+// eslint-disable-next-line no-control-regex
+const INVISIBLE = new RegExp(`[\\u0000-\\u0008\\u000E-\\u001F\\u007F-\\u0084\\u0086-\\u009F${INVISIBLE_CLASS}]`, 'g');
+
+// Every line break → '\n', invisibles stripped.
+export function sanitiseText(s) {
+  return String(s ?? '').replace(LINE_BREAKS, '\n').replace(INVISIBLE, '');
+}
+// A header field (channel, sender, type) is ONE line: its breaks become spaces.
+function headerField(s) {
+  return sanitiseText(s).replace(/\n/g, ' ');
 }
 
-// Hard-wrap a single logical line to width, never emitting an empty piece.
+// Server-side defence in depth (#51): at write time a content line that would read as a bus header
+// is quoted with '> ' — neutralised, never rejected, so a legitimate sender quoting a message still
+// gets through. CONT marking in the renderer is the real guarantee; this keeps the STORED text
+// unambiguous for anything that shows it without cc-render (the console, a replica, a raw GET).
+const FORGED_HEADER = new RegExp(`^[\\s${INVISIBLE_CLASS}]*CHAT #`, 'i');
+export function neutraliseForgedHeaders(content) {
+  const parts = String(content ?? '').split(new RegExp(`(${LINE_BREAK.source})`));
+  for (let i = 0; i < parts.length; i += 2) {      // odd indices are the captured separators
+    if (FORGED_HEADER.test(parts[i])) parts[i] = '> ' + parts[i];
+  }
+  return parts.join('');
+}
+
+// The header a message renders to, followed by its body: the body's first line sits on the header
+// line, every further line starts with CONT, so no content can ever begin a rendered line.
+export function renderLine(msg, identity, addressed = true) {
+  const tag = tagFor(msg, identity, addressed);
+  const lines = sanitiseText(msg.content || '').split('\n');
+  // Trailing blank lines carry nothing (and would spill into an empty final notification).
+  while (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  const body = lines.map((l, i) => (i === 0 ? l : CONT + l)).join('\n');
+  return `CHAT #${headerField(msg.channel)} ${headerField(msg.sender)} [${headerField(msg.message_type)}]${tag}: ${body}`;
+}
+
+// Hard-wrap a single logical line to width, never emitting an empty piece. The pieces after the
+// first are continuations too, so they carry CONT (a forged header 400 chars in must not surface).
 function hardWrap(line, width) {
   if (line.length <= width) return [line];
-  const out = [];
-  for (let i = 0; i < line.length; i += width) out.push(line.slice(i, i + width));
+  const out = [line.slice(0, width)];
+  const step = width - CONT.length;
+  for (let i = width; i < line.length; i += step) out.push(CONT + line.slice(i, i + step));
   return out;
 }
 
@@ -105,14 +149,18 @@ export function wrapForNotification(rendered, opts = {}) {
   const width = opts.width || WRAP_WIDTH;
   const maxLines = opts.maxLinesPerBlock || MAX_LINES_PER_BLOCK;
 
+  // Every physical line after the first must start with CONT. renderLine already marks content
+  // lines; re-asserting it here covers any caller that hands in raw text, so neither a line break
+  // nor a ‹part i/N› split can ever expose an unmarked line start (#51).
   const physical = [];
-  for (const logical of String(rendered).split('\n')) {
-    for (const piece of hardWrap(logical, width)) physical.push(piece);
-  }
+  String(rendered).split(LINE_BREAK).forEach((logical, li) => {
+    const line = li === 0 || logical.startsWith(CONT) ? logical : CONT + logical;
+    for (const piece of hardWrap(line, width)) physical.push(piece);
+  });
   // Drop trailing blank lines (a message ending in one or more '\n' — common — would otherwise
   // spill into a spurious empty final block/notification like "‹part N/N — end›" with nothing
   // under it). Interior blank lines are preserved. Keep at least one line.
-  while (physical.length > 1 && physical[physical.length - 1] === '') physical.pop();
+  while (physical.length > 1 && (physical[physical.length - 1] === '' || physical[physical.length - 1] === CONT)) physical.pop();
   if (physical.length === 0) physical.push('');
 
   const blocks = [];

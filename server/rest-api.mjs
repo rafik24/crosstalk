@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { WORK_STATES, WORK_KINDS, normalizeChannelName } from './db.mjs';
-import { canonicalShort } from '../src/cc-render.mjs';
+import { canonicalShort, neutraliseForgedHeaders } from '../src/cc-render.mjs';
 
 // Canonicalize an identity's short name server-side (#5): whatever a client registers, the
 // stored/advertised `host/<short>` has its short normalized the SAME way a dm-<short> channel is,
@@ -181,7 +181,10 @@ export function createRestRouter(db) {
       const channel = normalizeChannelName(body.channel ?? 'general') || 'general';
       await db.createChannel(channel, null);
 
-      const id = await db.sendMessage(channel, sender, content, messageType, inReplyTo);
+      // #51 defence in depth: a content line that reads as a `CHAT #…` bus header is stored quoted
+      // ('> CHAT #…') so no stored body can impersonate another sender's message. Neutralised, not
+      // rejected — quoting a message is legitimate. The size check above ran on what the sender sent.
+      const id = await db.sendMessage(channel, sender, neutraliseForgedHeaders(content), messageType, inReplyTo);
       res.json({ ok: true, id, channel, message_type: messageType });
     })
   );

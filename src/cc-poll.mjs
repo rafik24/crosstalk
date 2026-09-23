@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveFast, resolveFull, loadConfig } from './cc-discover.mjs';
 import { revString, pkgVersion } from './cc-rev.mjs';
-import { wrapForNotification } from './cc-render.mjs';
+import { renderLine, wrapForNotification } from './cc-render.mjs';
 
 const args = process.argv.slice(2);
 const instance = args[0];
@@ -135,14 +135,12 @@ async function tick(seed = false) {
       const addressed = atAll || m.channel === `dm-${shortId}` || m.channel.startsWith(`dm-${shortId}`) ||
         body.includes('@' + instance) || body.includes('@' + shortId);
       if (!FIREHOSE && !addressed) continue;  // ambient, not for me → do not wake
-      const tag = (addressed && m.message_type === 'handoff') ? ' »HANDOFF — ACK REQUIRED«'
-        : atAll ? ' »@ALL«'
-        : addressed ? ' »TO YOU«' : '';
-      // Wrap long bodies so the Claude Code harness delivers them WHOLE: it truncates a single
+      // renderLine (not a local template) so the tag AND the #51 forged-header marking match every
+      // other sink. Wrap long bodies so the Claude Code harness delivers them WHOLE: it truncates a single
       // Monitor event line at ~470 chars and a notification at ~3 KB, which is why a long DM used
       // to arrive "…(truncated)". Short messages (the common case) are one block, printed at once;
       // a long one is split into blocks spaced >250ms apart so each lands as its own notification.
-      const blocks = wrapForNotification(`CHAT #${m.channel} ${m.sender} [${m.message_type}]${tag}: ${body}`);
+      const blocks = wrapForNotification(renderLine(m, instance, addressed));
       for (let bi = 0; bi < blocks.length; bi++) {
         if (bi > 0) await new Promise((r) => setTimeout(r, 300));
         console.log(blocks[bi]);
