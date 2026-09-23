@@ -41,6 +41,10 @@ if (PORT < 8830 || PORT > 8849) { console.error(`refusing port ${PORT}: evals ma
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
+// The server opens messages.db under cc-paths.dataDir() — CC_DATA_DIR, else ~/.crosstalk (the
+// ESTATE's data dir). Pin it before the import so the DB can never land outside the scratch home.
+process.env.CC_DATA_DIR = join(HOME, 'evalbus-data');
+process.env.CC_CACHE_DIR = join(HOME, 'evalbus-cache');
 const { startServer } = await import(pathToFileURL(join(ROOT, 'server', 'server.mjs')).href);
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
 
