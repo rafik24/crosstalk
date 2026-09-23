@@ -24,6 +24,7 @@ import https from 'node:https';
 import { execFile } from 'node:child_process';
 import { configPath } from './cc-paths.mjs';
 import { canonicalShort } from './cc-render.mjs';
+import { nonce, whoamiProven, beaconProven, proofMode } from './cc-proof.mjs';
 
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_BEACON_PORT = 8788;
@@ -113,7 +114,7 @@ function probeJson(url, timeoutMs) {
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (c) => { body += c; if (body.length > 65536) finish(null); });   // a whoami is tiny
-        res.on('end', () => { try { finish(JSON.parse(body)); } catch { finish(null); } });
+        res.on('end', () => { try { const j = JSON.parse(body); if (j && typeof j === 'object') j.__reached = { address: res.socket?.remoteAddress, port: res.socket?.remotePort }; finish(j); } catch { finish(null); } });
         res.on('error', () => finish(null));
       });
       req.on('error', () => finish(null));
@@ -122,13 +123,40 @@ function probeJson(url, timeoutMs) {
   });
 }
 
-// --- one whoami probe ---
-export async function whoami(base, timeoutMs = 1500) {
+// What strict discovery IGNORED lately (base → { epoch, ts }). A supervisor about to promote
+// asks: did anyone answer without proof at an epoch ≥ mine? — during a rollout that is the
+// still-running pre-3.3.5 leader, and promoting beside it would split (or steal) the estate.
+const unprovenSeen = new Map();
+function noteUnproven(base, epoch) { unprovenSeen.set(base, { epoch: Number(epoch) || 0, ts: Date.now() }); }
+export function highestUnprovenEpoch(withinMs = 30000) {
+  let best = null;
+  for (const [b, v] of unprovenSeen) { if (Date.now() - v.ts > withinMs) { unprovenSeen.delete(b); continue; } if (best === null || v.epoch > best.epoch) best = { base: b, epoch: v.epoch }; }
+  return best;
+}
+
+// Unproven responders are reported once per base per process (a chatty warning would drown
+// the logs — a forger answers every scan).
+const warnedUnproven = new Set();
+const warnedBeacon = new Set();
+function warnUnproven(base, j) {
+  if (warnedUnproven.has(base)) return;
+  warnedUnproven.add(base);
+  console.error(`[discovery] ⚠️  ${proofMode() === 'legacy' ? 'ACCEPTING (CC_DISCOVERY_PROOF=legacy)' : 'IGNORING'} unproven leader ${base} (host ${j?.host}, epoch ${j?.epoch}) — it did not prove it holds the estate token`);
+}
+
+// --- one whoami probe --- (token: the estate token to verify the answer with; default = config)
+export async function whoami(base, timeoutMs = 1500, token = undefined) {
   base = base.replace(/\/$/, '');
   try {
-    const j = await probeJson(base + '/cc/whoami', timeoutMs);
+    const tok = token === undefined ? loadConfig().token : token;
+    const n = tok ? nonce() : null;
+    const j = await probeJson(base + '/cc/whoami' + (n ? `?nonce=${n}` : ''), timeoutMs);
     if (!j) return null;
     if (typeof j.epoch !== 'number') return null;
+    // Discovery authentication (issue 55): an enrolled client only trusts a responder that
+    // proves it holds the estate token. Legacy mode (rollout window) accepts with a warning.
+    const proven = whoamiProven(tok, n, j, j.__reached);
+    if (proven === false) { warnUnproven(base, j); noteUnproven(base, j.epoch); if (proofMode() !== 'legacy') return null; }
     // Canonical base = the address WE dialed (guaranteed reachable from here), not what the
     // server guesses. host/epoch/rev/watermark come from the server. watermark is the highest
     // message id served — a freshness proxy the election uses to break an equal-epoch tie.
@@ -137,6 +165,7 @@ export async function whoami(base, timeoutMs = 1500) {
       rev: j.rev || null, dirty: !!j.dirty,
       watermark: typeof j.watermark === 'number' ? j.watermark : 0,
       draining: !!j.draining,   // the leader is in a drain stepdown (read-only, about to leave)
+      proven: proven === true,  // false for an unproven responder accepted in legacy mode / by an unenrolled caller
     };
   } catch { return null; }
 }
@@ -174,7 +203,7 @@ function pickAuthoritative(responders) {
 }
 
 // --- LAN UDP solicit: broadcast "who's the leader?", collect unicast announces ---
-function lanSolicit(beaconPort, timeoutMs = 400) {
+function lanSolicit(beaconPort, timeoutMs = 400, token = '') {
   return new Promise((resolve) => {
     const found = [];
     let sock;
@@ -200,6 +229,14 @@ function lanSolicit(beaconPort, timeoutMs = 400) {
       try {
         const m = JSON.parse(buf.toString());
         if (m && m.t === 'announce' && typeof m.epoch === 'number') {
+          // Issue 55: an announce must carry a fresh, valid proof (or the caller runs legacy).
+          const proven = beaconProven(token, m);
+          if (proven === false) {
+            // Say WHY, once per source: a clock >60s off silently killed LAN discovery otherwise.
+            const key = rinfo.address + ':' + m.port;
+            if (!warnedBeacon.has(key)) { warnedBeacon.add(key); const skew = typeof m.ts === 'number' ? Math.round(Math.abs(Date.now() - m.ts) / 1000) : null; console.error(`[discovery] ⚠️  ${proofMode() === 'legacy' ? 'ACCEPTING' : 'IGNORING'} beacon from ${rinfo.address} (host ${m.host}, epoch ${m.epoch}): ${typeof m.proof !== 'string' ? 'unsigned (pre-3.3.5 leader?)' : skew !== null && skew > 60 ? `stale by ${skew}s — check the clocks on both boxes` : 'bad proof (different estate token)'}`); }
+            if (proofMode() !== 'legacy') return;
+          }
           found.push({ ip: rinfo.address, port: m.port || DEFAULT_PORT, host: m.host, epoch: m.epoch });
         }
       } catch {}
@@ -269,7 +306,7 @@ export async function resolveFast(opts = {}) {
   // stale/demoted loopback or a warm cache entry must never win over a live higher-epoch
   // leader (that bug let a superseded loopback "zombie" leader keep co-located clients
   // bound to it forever). pickAuthoritative applies the epoch>tiebreak ordering.
-  const responders = await Promise.all(tryBases.map((b) => whoami(b, opts.timeoutMs || 1200)));
+  const responders = await Promise.all(tryBases.map((b) => whoami(b, opts.timeoutMs || 1200, opts.token ?? cfg.token)));
   const best = pickAuthoritative(responders);
   if (best) { cacheLeader(best); return best; }
   // Fast path missed → escalate to a full scan (also follows a migration).
@@ -294,13 +331,13 @@ export async function resolveFull(opts = {}) {
 
   // LAN + tailnet in parallel — unless discovery is confined to the explicit peer list.
   const [lan, ts] = cfg.discovery === 'peers' ? [[], []] : await Promise.all([
-    lanSolicit(cfg.beaconPort, opts.lanTimeoutMs || 400),
+    lanSolicit(cfg.beaconPort, opts.lanTimeoutMs || 400, opts.token ?? cfg.token),
     tailscalePeers(),
   ]);
   for (const r of lan) bases.add(`http://${r.ip}:${r.port}`);
   for (const ip of ts) bases.add(`http://${ip}:${port}`);
 
-  const responders = await Promise.all([...bases].map((b) => whoami(b, opts.timeoutMs || 1500)));
+  const responders = await Promise.all([...bases].map((b) => whoami(b, opts.timeoutMs || 1500, opts.token ?? cfg.token)));
   let best = pickAuthoritative(responders);
   // Optionally ignore a leader that is THIS node (election needs "is anyone ELSE leading?").
   if (best && opts.skipSelf && best.host === selfHost && isLoopbackOrSelf(best.base)) {

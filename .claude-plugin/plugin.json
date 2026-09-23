@@ -2,7 +2,7 @@
   "name": "crosstalk",
   "displayName": "Crosstalk",
   "description": "A self-hosting, near-real-time coordination bus for Claude Code sessions across machines: cross-machine messaging + presence, a shared work board with an atomic claim-lock, zero-config leader discovery + failover, and a human console.",
-  "version": "3.3.4",
+  "version": "3.3.5",
   "author": { "name": "Rafik Boulellou" },
   "homepage": "https://github.com/rafik24/crosstalk",
   "repository": "https://github.com/rafik24/crosstalk",

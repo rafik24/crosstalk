@@ -1,6 +1,6 @@
 {
   "name": "crosstalk",
-  "version": "3.3.4",
+  "version": "3.3.5",
   "description": "Crosstalk — a self-hosting coordination bus for AI coding-agent sessions: cross-machine messaging, presence, a shared work board with a distributed claim-lock, zero-config leader discovery + failover, and a human console. One clone on any node can host the bus or connect to whoever is hosting.",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
     "server": "node --disable-warning=ExperimentalWarning server/server.mjs",
     "console": "node src/cc-console.mjs",
     "test": "npm run test:unit && npm run test:fleet",
-    "test:unit": "node test/paths.test.mjs && node test/render.test.mjs && node test/db.test.mjs && node test/rest.test.mjs && node test/server.test.mjs && node test/ws.test.mjs && node test/discovery.test.mjs && node test/supervisor.test.mjs && node test/console.test.mjs && node test/console-dotpath.test.mjs && node test/console-render.test.mjs && node test/version-gate.test.mjs && node test/listen-gate.test.mjs && node test/codex-bridge.test.mjs && node test/pi-extension.test.mjs && node test/known-edges.test.mjs && node test/receive-rewind.test.mjs",
+    "test:unit": "node test/paths.test.mjs && node test/render.test.mjs && node test/db.test.mjs && node test/rest.test.mjs && node test/server.test.mjs && node test/ws.test.mjs && node test/poll.test.mjs && node test/discovery.test.mjs && node test/supervisor.test.mjs && node test/console.test.mjs && node test/console-dotpath.test.mjs && node test/console-render.test.mjs && node test/version-gate.test.mjs && node test/listen-gate.test.mjs && node test/codex-bridge.test.mjs && node test/pi-extension.test.mjs && node test/known-edges.test.mjs && node test/receive-rewind.test.mjs && node test/proof.test.mjs",
     "test:fleet": "node test/fleet.test.mjs && node test/turnplay.test.mjs && node test/handover.test.mjs && node test/coldstart.test.mjs && node test/replication.test.mjs && node test/cursor-rewind.test.mjs && node test/leader-stall.test.mjs"
   },
   "dependencies": {

@@ -32,7 +32,10 @@ fi
 # Not enrolled: say so in ONE line instead of exiting silently (issue #38 — a fresh plugin
 # install used to do nothing and say nothing, so the machine looked broken rather than unenrolled).
 if [ ! -f "$CFG" ]; then
-  echo "crosstalk: plugin installed but this machine is not enrolled — create $CFG with CC_TOKEN=<estate token> (+ CC_AUTO_SUPERVISOR=1 to let the first session start the bus). See the plugin's ENROLLMENT.md."
+  # Enrolment by PASSWORD (issue 55): a hook cannot prompt, so point at the one command that can.
+  ENROL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cc-enrol.mjs"
+  command -v cygpath >/dev/null 2>&1 && ENROL="$(cygpath -m "$ENROL")"
+  echo "crosstalk: plugin installed but this machine is NOT ENROLLED - run:  node \"$ENROL\" --auto-supervisor   and enter the estate password (verified against the live bus before anything is written). Details: the plugin's ENROLLMENT.md."
   exit 0
 fi
 command -v node >/dev/null 2>&1 || exit 0

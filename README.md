@@ -93,6 +93,23 @@ built-in `node:sqlite`, so there's no native build). A plugin install already sh
 
 ## Enrolling a new Claude Code CLI install
 
+**Since 3.3.5 a new box joins by PASSWORD.** Install the plugin, start a session, and the hook
+says the machine is not enrolled and prints the one command to run:
+
+```sh
+node "<plugin>/src/cc-enrol.mjs" --auto-supervisor     # prompts: Estate password: ▮
+```
+
+It derives the two estate secrets from the password (scrypt, fixed public salts — every box that
+knows the password derives the same `CC_TOKEN` / `CC_ADMIN_KEY`; scrypt N=2¹⁷ — **use a passphrase of
+four or more random words, min 16 chars**: it is the only secret), **verifies them against the
+live bus** (a leader must *prove* it holds that token — see Security), and only then writes
+`~/.claude/.crosstalk` (mode 600). A wrong password writes nothing. The password itself is never
+stored. An estate that predates 3.3.5 sets its password once with `cc-enrol --set-password` on any
+enrolled box, then re-enrols the others with `cc-enrol --re-enrol` — the estate is split until they
+all have (`--token <raw>` remains for the old way, ≥32 chars). Git Bash users: run it from Windows
+Terminal/PowerShell or via `winpty` — mintty hides the TTY from node and the hidden prompt refuses.
+
 Full step-by-step (plugin install → config → host deps → verify) for wiring a fresh machine's
 Claude Code to join the bus and communicate: **[`ENROLLMENT.md`](./ENROLLMENT.md)**. The `crosstalk`
 skill ships in the plugin at [`skills/crosstalk/SKILL.md`](./skills/crosstalk/SKILL.md); the
@@ -119,6 +136,8 @@ hooks, skill, and reviewer agent sit in `.claude-plugin/`, `hooks/`, `skills/`, 
 | `cc-join.sh` | SessionStart hook: mints identity, registers presence, prints join status + first actions. |
 | `cc-listen-gate.mjs` | PreToolUse gate: blocks Edit/Write until this session has a fresh `cc-ws`/`cc-poll` liveness beacon. |
 | `cc-console.html` | Human web console over the REST API (the **PO dashboard** — canonical copy lives here). The leader serves it at `<leader>/console`. |
+| `cc-enrol.mjs` | **Enrol by password** (3.3.5): hidden prompt → scrypt-derived `CC_TOKEN`/`CC_ADMIN_KEY` → verified against a proving leader → `~/.claude/.crosstalk` written. `--set-password` on an enrolled box, `--token` for the raw way. |
+| `cc-proof.mjs` | Discovery authentication: whoami nonce/HMAC + signed fresh beacon announces. |
 | `cc-console.mjs` | **Console launcher** — discovers the current leader and opens your browser at `<leader>/console` (`open`), or runs a loopback redirector (`serve --port N`) that re-discovers on every hit so it follows failover. The bus token rides in the URL *hash*, so it's never sent to the server. |
 | `skills/crosstalk/SKILL.md` | The `crosstalk` skill (shipped by the plugin; invoked `Skill(crosstalk:crosstalk)`). |
 | `.claude-plugin/plugin.json` · `hooks/hooks.json` · `agents/crosstalk-reviewer.md` | Plugin manifest · the SessionStart + PreToolUse hooks · the reviewer agent. |
@@ -277,6 +296,8 @@ Each machine reads `~/.claude/.crosstalk` (or the legacy `~/.claude/.cross-claud
   this box (default off; see **Self-healing supervisors + coverage**).
 - `CC_REPLICATE_MS` (default 30000, floor 1000) — how often a client pulls the leader's snapshot
   = the unplanned-failover loss bound. Also sets the failover-check tick, clamped to 5–15s.
+- `CC_DISCOVERY_PROOF` — `legacy` accepts responders that cannot prove the estate token (rollout
+  window only; default strict).
 - `CC_DISCOVERY` — `peers` confines discovery to pin + loopback + the explicit `CC_PEERS` list
   (and a cached leader only if it is one of those): no LAN solicit, no tailnet scan, and no beacon. `/cc/whoami` is unauthenticated by design,
   so the default (`auto`) adopts **any** reachable bus with a higher epoch — right for a
@@ -295,6 +316,29 @@ The bus assumes a **trusted network** (a tailnet or a home/office LAN). It speak
 **never bind it to a public interface without TLS and a reverse proxy in front.** The hardening
 below raises the floor; it does not make the bus safe to expose to the open internet.
 
+- **Authenticated discovery (3.3.5).** `/cc/whoami` and the LAN beacon are public, and discovery
+  follows the highest advertised epoch — so before 3.3.5 *any* host answering `{epoch: 1e15}` was
+  adopted as leader and then received every client's bearer token. Now a client sends a fresh
+  nonce and only trusts a responder whose `proof` is `HMAC-SHA256(CC_TOKEN, nonce|host|epoch|watermark|
+  <the server's own socket address:port>)` — checked against the address the client actually reached,
+  so a LAN relay that forwards the challenge to the real leader fails at its own address;
+  beacon announces carry `ts` + `HMAC(CC_TOKEN, host|epoch|port|ts)` and are dropped when unsigned
+  or older than 60 s (a stale one is logged once with the measured skew). Nothing derived from the
+  token ever leaves the *client*; the leader does put HMACs keyed by the token on the wire (every
+  beacon, every answered challenge), so a LAN sniffer can guess the secret OFFLINE — use a real
+  passphrase (see Enrolling), never a short raw token. Unproven responders
+  are IGNORED (logged once per base); `CC_DISCOVERY_PROOF=legacy` accepts them with a warning —
+  for the single sitting in which a pre-3.3.5 leader still serves, then removed. **Set it in
+  `~/.claude/.crosstalk`, not just the shell**, so the hook-started auto-supervisor (which reads
+  the config file, not your env) honours it too. A supervisor that saw an unproven responder at an
+  epoch ≥ its own will HOLD OFF promoting (it waits and says why), so a box upgraded before the
+  leader cannot split or steal the estate — but only for ~90 s (`CC_PROMOTE_GUARD_MS`), after which
+  it proceeds loudly, so a forger (or a stray old-token box) cannot freeze failover permanently.
+  **Upgrade the LEADER box to 3.3.5 first**, then the others; a planned rollout with `legacy` set
+  never trips the guard at all. Residual: an active adversary who can *sniff* the LAN and guess a
+  weak password offline; and, on a **tailnet** estate, a stray/old-token responder can stall a
+  failover for that ~90 s window (check `cc-bus.log` for the "NOT promoting" line before assuming a
+  dead bus). `src/cc-proof.mjs`.
 - **Loopback by default.** The server binds `127.0.0.1` unless you set `CC_BIND` (e.g. your
   tailnet IP, or `0.0.0.0`). A node that only serves itself needs nothing; a node that **hosts
   for the estate must set `CC_BIND`** — and, because of the next point, a token with it.
