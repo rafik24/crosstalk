@@ -7,7 +7,8 @@
 //
 //   whoami    the client sends a fresh nonce; the leader answers with
 //             proof = HMAC-SHA256(CC_TOKEN, "whoami|" + nonce + "|" + host + "|" + epoch + "|" +
-//                                 watermark + "|" + <the server's OWN socket address:port>)
+//                                 watermark + "|" + <the server's OWN socket address:port>
+//                                 [+ "|id=" + host_id] [+ "|electing"])   — when present, issues 48/49
 //             The client checks it against the address it actually reached — so a RELAY on the
 //             LAN that forwards the challenge to the real leader fails at the relay's address
 //             (the leader signed ITS address, not the relay's), and the unsigned election
@@ -44,7 +45,16 @@ export function normAddr(a) {
   const z = s.indexOf('%'); if (z >= 0) s = s.slice(0, z);
   return s;
 }
-export function whoamiProof(token, n, host, epoch, watermark, addr, port) { return hmac(token, `whoami|${n}|${host}|${epoch}|${watermark ?? 0}|${normAddr(addr)}:${port}`); }
+// `extra` carries the whoami fields the ELECTION reads beyond host/epoch/watermark — hostId (issue 49:
+// the collision-safe host identity, which now orders an exact tie) and electing (issue 48: an
+// unconfirmed term yields to an open one). They are signed for the same reason the watermark is: an
+// unsigned tiebreak can be rewritten in flight to pick who yields. Each is appended ONLY when present,
+// so an answer without them signs exactly the pre-existing material, and a verifier recomputes from
+// the fields the answer actually carries — adding, dropping or changing one breaks the proof.
+export function whoamiProof(token, n, host, epoch, watermark, addr, port, { hostId = null, electing = false } = {}) {
+  return hmac(token, `whoami|${n}|${host}|${epoch}|${watermark ?? 0}|${normAddr(addr)}:${port}` +
+    (typeof hostId === 'string' && hostId ? `|id=${hostId}` : '') + (electing === true ? '|electing' : ''));
+}
 export function beaconProof(token, host, epoch, port, ts) { return hmac(token, `beacon|${host}|${epoch}|${port}|${ts}`); }
 
 export function proofsMatch(a, b) {
@@ -78,7 +88,7 @@ export function proofMode() {
 export function whoamiProven(token, n, j, reached) {
   if (!token) return null;
   if (!j || typeof j.proof !== 'string' || !reached) return false;
-  return proofsMatch(whoamiProof(token, n, j.host, j.epoch, j.watermark, reached.address, reached.port), j.proof);
+  return proofsMatch(whoamiProof(token, n, j.host, j.epoch, j.watermark, reached.address, reached.port, { hostId: j.host_id, electing: j.electing }), j.proof);
 }
 
 export function beaconProven(token, m, now = Date.now()) {

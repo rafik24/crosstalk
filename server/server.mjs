@@ -55,6 +55,9 @@ function resolveConfig(opts = {}) {
     allowNoAuth: opts.allowNoAuth === true || env.CC_ALLOW_NO_AUTH === '1',
     epoch: Number(opts.epoch ?? env.CC_EPOCH ?? 0),
     host: (opts.host ?? env.CC_HOST) || os.hostname(),
+    // Collision-safe host identity (issue 49) — the supervisor passes its own; advertised in whoami
+    // so peers compare machines on it rather than on the (colliding) canonical slug. Unset ⇒ omitted.
+    hostId: (opts.hostId ?? env.CC_HOST_ID) || null,
     // Where the .stepdown marker lands (issue #34); the supervisor passes CC_DATA_DIR. Unset ⇒ no marker.
     dataDir: opts.dataDir ?? env.CC_DATA_DIR ?? null,
     // /cc/stepdown ends the PROCESS (not just the listener) — true for a real spawned server; tests
@@ -235,9 +238,13 @@ export async function startServer(opts = {}) {
   //                   snapshot only counts as FINAL when this is 0, so a write that raced the
   //                   drain flag can never be acknowledged yet missing from the final snapshot.
   //   lastExportAt    when a replica last pulled — no recent pull ⇒ nobody to drain for.
+  //   releasing       a final pull is being served and WILL release us (issue 52): exactly one
+  //                   replica is told so (x-cc-released) and elects at once; every other replica
+  //                   holds off, so two replicas never promote into the same epoch together.
   let draining = null;
   let inflightWrites = 0;
   let lastExportAt = 0;
+  let releasing = false;
   let finishDrain = () => {};
   function drainGuard(req, res, next) {
     if (req.method === 'GET' || req.method === 'HEAD') return next();
@@ -277,10 +284,11 @@ export async function startServer(opts = {}) {
     const n = typeof req.query.nonce === 'string' && /^[0-9a-f]{16,64}$/.test(req.query.nonce) ? req.query.nonce : null;
     res.json({
       role: 'leader', host: config.host, epoch: config.epoch, base: config.baseUrl,
+      ...(config.hostId ? { host_id: config.hostId } : {}),   // collision-safe host identity (issue 49)
       watermark, rev: code.rev, dirty: code.dirty,
       version: serverVersion,   // the release version the fleet must match (see version-gate.mjs)
       ...(draining ? { draining: true } : {}),   // a drain stepdown is in progress (issue 43)
-      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort) } : {}),
+      ...(n && config.apiKey ? { proof: whoamiProof(config.apiKey, n, config.host, config.epoch, watermark, req.socket.localAddress, req.socket.localPort, { hostId: config.hostId }) } : {}),
     });
   });
 
@@ -397,10 +405,16 @@ export async function startServer(opts = {}) {
     }
     lastExportAt = Date.now();
     if (draining) res.set('x-cc-draining', '1');   // tells the replica: I am leaving — follow closely
+    // Only the FIRST final pull releases us, and only it is told so. Concurrent final pulls are just
+    // as complete, but if every one of them carried the marker their replicas would promote into
+    // the same epoch together — the tie issue 52 is about.
+    const releases = finalPull && !releasing;
+    if (releases) { releasing = true; res.set('x-cc-released', '1'); }
     res.download(tmp, 'messages.db', (err) => {
       fs.rm(tmp, { force: true }, () => {});
+      if (err && releases) releasing = false;   // that replica never got it — the next final pull releases
       if (err && !res.headersSent) return next(err);
-      if (!err && finalPull) finishDrain('a replica pulled the final snapshot');
+      if (!err && releases) finishDrain('a replica pulled the final snapshot');
     });
   });
 

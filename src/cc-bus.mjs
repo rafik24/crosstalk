@@ -26,9 +26,10 @@ import { hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, createHash } from 'node:crypto';
 import {
   loadConfig, resolveFull, whoami, cacheLeader, readCache, readTrustedCache, outranks, highestUnprovenEpoch, DEFAULT_PORT,
+  localHostIdentity, sameHost,
 } from './cc-discover.mjs';
 import { startBeacon } from './cc-beacon.mjs';
 import { whoamiProof } from './cc-proof.mjs';
@@ -45,7 +46,10 @@ const SERVER_ENTRY = join(__dirname, '..', 'server', 'server.mjs');
 // to leak into the advertised leader host while instance ids were lowercased, so the same box
 // compared unequal to itself (defeating the same-host guard) and the election tie-break depended
 // on casing/locale. canonicalShort is the same filter cc-name applies to instance ids.
-const HOST = canonicalShort(process.env.CC_HOST || hostname()) || 'unknown-host';
+// HOST is the display/routing NAME; HOST_ID is what "is that this machine?" compares (issue 49 —
+// different machines can slug alike). See cc-discover's hostIdOf/sameHost.
+const { host: HOST, hostId: HOST_ID } = localHostIdentity();
+const ME = { host: HOST, hostId: HOST_ID };
 const DATA_DIR = dataDir();   // ~/.crosstalk (migrated from ~/.cross-claude-mcp once); CC_DATA_DIR overrides
 const EPOCH_FILE = join(DATA_DIR, 'epoch');
 const DB_FILE = join(DATA_DIR, 'messages.db');
@@ -76,6 +80,8 @@ const HANDOVER_WAIT_MS = 26000;     // version handover: how long to wait for a 
 const STEPDOWN_HOLDOFF_MS = CLIENT_TICK_MAX_MS + 10000;   // an ex-leader may JOIN but not ELECT for this long
 const GUARD_MAX_MS = Math.max(15000, parseInt(process.env.CC_PROMOTE_GUARD_MS) || 90000);   // cap the "unproven responder present, hold off promoting" wait (issue 55) so a forger can't freeze failover
 const DRAIN_FOLLOW_MAX_MS = 30000;  // > the server's drain deadline (20s): never follow a drain forever
+const RELEASE_GRACE_MS = 5000;      // issue 52: a replica that did NOT release the drain waits this long (plus
+const RELEASE_JITTER_MS = 3000;     // a per-host spread) before electing, so the replica that DID can promote alone
 
 // Is `pid` a live process? signal 0 tests existence cross-platform: it throws ESRCH when the
 // process is gone and EPERM when it exists but we can't signal it (still alive → true).
@@ -159,6 +165,26 @@ function writeEpoch(n) {
 }
 
 const log = (...a) => console.log(`[cc-bus ${HOST}]`, ...a);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A stable, host-derived delay in [0, maxMs): spreads otherwise-simultaneous elections across hosts
+// deterministically (the same box always waits the same), with no coordination needed.
+function hostJitterMs(maxMs) {
+  return createHash('sha256').update('jitter|' + HOST_ID).digest().readUInt32BE(0) % Math.max(1, maxMs);
+}
+
+// Is `peer` (a whoami answer) THIS machine? The same-host guard, the "server already running here"
+// check and the handover all ask it. Two boxes whose names slug alike are told apart by host id —
+// and that is worth a loud line, once per peer: they still look identical in logs, console and DMs.
+const warnedHostTwins = new Set();
+function isThisHost(peer) {
+  const same = sameHost(peer, ME);
+  if (!same && peer?.hostId && canonicalShort(String(peer.host || '')) === HOST && !warnedHostTwins.has(peer.hostId)) {
+    warnedHostTwins.add(peer.hostId);
+    log(`⚠️  ${peer.base || 'a peer'} calls itself "${peer.host}" — THIS box's name — but has a different host id (${peer.hostId} ≠ ${HOST_ID}): treating it as a different machine. Their hostnames canonicalise alike, so logs, the console and DM routing cannot tell them apart — rename one box (or set CC_HOST on it).`);
+  }
+  return same;
+}
 
 // --- spawn the vendored server as leader at a given epoch ---
 function spawnLeader(epoch, port, token) {
@@ -172,6 +198,7 @@ function spawnLeader(epoch, port, token) {
       MCP_API_KEY: token || process.env.MCP_API_KEY || '',
       CC_EPOCH: String(epoch),
       CC_HOST: HOST,
+      CC_HOST_ID: HOST_ID,   // advertised in whoami: peers tell this box from a same-slug one (issue 49)
       CC_DATA_DIR: DATA_DIR,
       // Pass the admin key through explicitly so the server honours it even when it came from the
       // config FILE (loadConfig) rather than the ambient env — otherwise /cc/export etc. stay
@@ -213,20 +240,24 @@ async function waitFor(base, predicate, timeoutMs = 20000, everyMs = 400) {
 // image in atomically. Best-effort: any failure returns false and never disturbs the client.
 async function replicateSnapshot(leader, token) { return (await pullSnapshot(leader, token)).ok; }
 const PULL_TIMEOUT_MS = 60000;   // a stalled leader must not hold a pull open for ever
-// → { ok, draining }: `draining` = the leader answered with x-cc-draining (it is in a drain
-// stepdown — read-only and leaving as soon as a replica holds the final snapshot; issue 43).
+// → { ok, draining, released }: `draining` = the leader answered with x-cc-draining (it is in a
+// drain stepdown — read-only and leaving as soon as a replica holds the final snapshot; issue 43);
+// `released` = THIS pull was that final snapshot, the one that lets it leave (x-cc-released, issue 52).
 async function pullSnapshot(leader, token, stillWanted = () => true) {
-  const miss = { ok: false, draining: false };
+  const miss = { ok: false, draining: false, released: false };
   try {
     // Issue #35: NEVER replicate when the leader is this very host — the pull would target the
     // same DATA_DIR the live leader has open. The old guard matched only a loopback-resolved
     // base URL (defeated by CC_BIND=0.0.0.0, where discovery returns the LAN address) and a
     // case-sensitive host compare (defeated by OS-vs-config casing, issue #39). Canonical host
     // equality catches both. A same-host client still watches for failover; it just never pulls.
-    if (canonicalShort(String(leader.host || '')) === HOST) return miss;
+    // Issue 49: "same host" is decided on the host id, so a DIFFERENT box that merely slugs alike
+    // is replicated from like any other leader (it used to be skipped: unbounded loss on failover).
+    if (isThisHost(leader)) return miss;
     const r = await fetch(leader.base + '/cc/export', { headers: { Authorization: adminBearer(token) }, signal: AbortSignal.timeout(PULL_TIMEOUT_MS) });
     if (!r.ok) return miss;
     const draining = r.headers.get('x-cc-draining') === '1';
+    const released = r.headers.get('x-cc-released') === '1';
     const buf = Buffer.from(await r.arrayBuffer());
     if (!buf.length) return miss;
     // A pull can outlive the role that started it (a STALLED leader answers its export long after
@@ -239,7 +270,7 @@ async function pullSnapshot(leader, token, stillWanted = () => true) {
     writeFileSync(tmp, buf);
     renameSync(tmp, REPLICA_FILE);   // atomic on both POSIX and Windows; live DB untouched (#35)
     if (typeof leader.epoch === 'number') writeEpoch(Math.max(readEpoch(), leader.epoch));   // the epoch file is MONOTONIC
-    return { ok: true, draining };
+    return { ok: true, draining, released };
   } catch { return miss; }
 }
 
@@ -304,11 +335,11 @@ async function cmdStart() {
   // --- singleton heartbeat + estate-visible presence (#6) -------------------------------------
   // Prove this box has a live supervisor (so `cc-bus ensure` won't start a second one) and make
   // that failover capacity observable estate-wide (so `cc-bus status` can show the SPOF state).
-  const supervisorId = SUPERVISOR_PREFIX + HOST;
+  const supervisorId = supervisorInstanceId(HOST, HOST_ID);
   const beat = () => {
     // version + path let `ensure` detect a supervisor left running from a superseded plugin
     // install (issue #37) and hand over instead of treating the stale one as healthy.
-    writeSupervisor({ pid: process.pid, ts: Date.now(), host: HOST, role: role || 'starting', epoch: currentEpoch, version: pkgVersion() || null, path: fileURLToPath(import.meta.url) });
+    writeSupervisor({ pid: process.pid, ts: Date.now(), host: HOST, hostId: HOST_ID, role: role || 'starting', epoch: currentEpoch, version: pkgVersion() || null, path: fileURLToPath(import.meta.url) });
     registerSupervisor(supervisorId, role, currentEpoch, token, port).catch(() => {});
   };
   beat();
@@ -454,7 +485,7 @@ async function cmdStart() {
         const r = await pullSnapshot(leaderNow, token, live);
         if (!live()) return;
         if (r.ok) lastReplicateOk = Date.now();
-        if (r.draining) { stop(); followDrain(leaderNow); }
+        if (r.draining) { stop(); followDrain(leaderNow, r.released); }
       } finally { pulling = false; }
     }
 
@@ -504,8 +535,20 @@ async function cmdStart() {
   // elect at once rather than a tick later. "Gone" needs TWO consecutive misses: a draining leader
   // is busy (every follower pulls a full VACUUM INTO image), and one slow whoami must not make us
   // promote beside it. Bounded: a leader that never leaves hands us back to the ordinary loop.
-  async function followDrain(leader) {
+  // Only the replica whose pull RELEASED the leader elects at once (issue 52). With two or more
+  // replicas every one of them polls the drain on the same 500ms beat and counts its two misses in
+  // the same second, so "elect now" for all of them was a DETERMINISTIC same-epoch double promotion.
+  // The others wait out RELEASE_GRACE_MS + a per-host spread, then elect through the ordinary path —
+  // which scans first and finds the releaser already leading. If nobody was released (the drain hit
+  // its deadline, or a pre-3.3.5 leader that sends no marker) the spread alone keeps them apart.
+  // One follower per client generation: the scan tick and an in-flight pull can both notice the
+  // drain, and two loops would each call electAndRun (two servers racing for one port). A second
+  // caller only contributes what it learned — its pull may have been the releasing one.
+  let drainFollow = null;   // { gen, released }
+  async function followDrain(leader, released = false) {
     const gen = clientGen;
+    if (drainFollow && drainFollow.gen === gen) { if (released) drainFollow.released = true; return; }
+    const me = drainFollow = { gen, released };
     const live = () => role === 'client' && gen === clientGen;
     log(`leader ${leader.host} is DRAINING for a stepdown → pulling its final snapshot and standing by to take the term`);
     const end = Date.now() + DRAIN_FOLLOW_MAX_MS;
@@ -514,9 +557,16 @@ async function cmdStart() {
       const w = await whoami(leader.base, 1500);
       if (!live()) return;
       misses = w ? 0 : misses + 1;
-      if (misses >= 2) { log('draining leader is gone → electing now'); return electAndRun(); }
-      if (w) await pullSnapshot(leader, token, live);
-      await new Promise((r) => setTimeout(r, 500));
+      if (misses >= 2) {
+        if (me.released) { log('draining leader is gone and I pulled the FINAL snapshot → electing now'); return electAndRun(); }
+        const wait = RELEASE_GRACE_MS + hostJitterMs(RELEASE_JITTER_MS);
+        log(`draining leader is gone; another replica took the final snapshot → holding off ${wait} ms so it takes the term alone`);
+        await sleep(wait);
+        if (!live()) return;
+        return electAndRun();
+      }
+      if (w && (await pullSnapshot(leader, token, live)).released) me.released = true;
+      await sleep(500);
     }
     if (live()) runClient();
   }
@@ -536,7 +586,7 @@ async function cmdStart() {
     if (leader) {
       cacheLeader(leader);
       currentEpoch = leader.epoch ?? currentEpoch;
-      if (canonicalShort(String(leader.host || '')) === HOST) {
+      if (isThisHost(leader)) {
         // A server is already running on THIS host (previous cc-bus). Don't double-start.
         // Canonical compare (#39) — the old `leader.host === HOST && loopback-base` pair missed a
         // CC_BIND leader (discovery returns the LAN address) and any casing difference (#35).
@@ -585,10 +635,29 @@ async function cmdStart() {
 // stale cache) would kill the newer supervisor right back — bidirectional thrash, with the
 // OLDER code winning the last round and version-gating the whole upgraded fleet out: the exact
 // failure #37 exists to fix, reintroduced by the fix. Exported for the test suite.
-function semverNewer(a, b) {   // true ⇔ a > b (numeric x.y.z compare; missing parts = 0)
-  const pa = String(a).split('.').map((n) => parseInt(n) || 0);
-  const pb = String(b).split('.').map((n) => parseInt(n) || 0);
-  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0); }
+// Issue 49: the prerelease part counts. It used to be ignored, so `3.3.4-rc1` and `3.3.4` compared
+// EQUAL here while the version gate (a string compare) called them different — an -rc1 supervisor
+// that led locked the final-3.3.4 fleet out and was never handed over. SemVer 2.0 precedence: a
+// release outranks its own prereleases; prerelease ids compare left to right, numeric ones
+// numerically and below alphanumeric ones, and a longer id list outranks its prefix. Build
+// metadata (+…) is ignored.
+function semverNewer(a, b) {   // true ⇔ a > b (numeric x.y.z; missing parts = 0; then prerelease)
+  const parse = (v) => {
+    const [core, ...pre] = String(v).split('+')[0].split('-');
+    return { nums: core.split('.').map((n) => parseInt(n) || 0), pre: pre.length ? pre.join('-').split('.') : [] };
+  };
+  const pa = parse(a), pb = parse(b);
+  for (let i = 0; i < 3; i++) { if ((pa.nums[i] || 0) !== (pb.nums[i] || 0)) return (pa.nums[i] || 0) > (pb.nums[i] || 0); }
+  if (!pa.pre.length || !pb.pre.length) return !pa.pre.length && pb.pre.length > 0;   // release > prerelease
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i++) {
+    const x = pa.pre[i], y = pb.pre[i];
+    if (x === undefined || y === undefined) return y === undefined;   // the longer list outranks its prefix
+    if (x === y) continue;
+    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
+    if (xn && yn) return Number(x) > Number(y);
+    if (xn !== yn) return !xn;                                          // alphanumeric > numeric
+    return x > y;
+  }
   return false;
 }
 export function needsVersionHandover(live, myVersion = pkgVersion()) {
@@ -687,7 +756,7 @@ async function cmdHandover(args) {
   // are replacing — probe without the token (plain answer) so the drain still runs.
   const before = await whoami(loop, 1500, '');
   let drained = false;
-  if (before && canonicalShort(String(before.host || '')) === HOST) {
+  if (before && isThisHost(before)) {
     log(`handover: asking the local leader (epoch ${before.epoch}) to DRAIN and step down`);
     try {
       const r = await fetch(loop + '/cc/stepdown?drain=1', { method: 'POST', headers: { Authorization: adminBearer(cfg.token) }, signal: AbortSignal.timeout(3000) });
@@ -719,8 +788,8 @@ async function cmdStatus() {
     const leaderRev = leader.rev || 'unknown';
     const myVer = pkgVersion() || 'unknown';
     const leaderVer = leader.version || 'unknown';
-    console.log(`LEADER: ${leader.host}  epoch=${leader.epoch}  watermark=${leader.watermark ?? 0}  base=${leader.base}  rev=${leaderRev}  version=${leaderVer}`);
-    console.log(`THIS NODE: ${HOST}  rev=${mine}  version=${myVer}  local-supervisor=${supervisorLive() ? 'running' : 'none'}  log=${join(DATA_DIR, 'cc-bus.log')}`);
+    console.log(`LEADER: ${leader.host}${leader.hostId ? ` (id ${leader.hostId})` : ''}  epoch=${leader.epoch}  watermark=${leader.watermark ?? 0}  base=${leader.base}  rev=${leaderRev}  version=${leaderVer}`);
+    console.log(`THIS NODE: ${HOST} (id ${HOST_ID})  rev=${mine}  version=${myVer}  local-supervisor=${supervisorLive() ? 'running' : 'none'}  log=${join(DATA_DIR, 'cc-bus.log')}`);
     // Version mismatch is now ENFORCED (the bus refuses a non-matching client, see version-gate.mjs),
     // so surface it prominently — a stale host here is one that would be blocked from joining.
     if (leader.version && myVer !== 'unknown' && myVer !== leaderVer) {
@@ -737,6 +806,19 @@ async function cmdStatus() {
   }
 }
 
+// The presence id a supervisor registers under. The server canonicalises the segment after '/', so
+// it must already be canonical: `<slug>-h<hostId>`. The host id is in it because two boxes whose
+// names slug alike registered ONE id and counted as one supervisor (issue 49): `status` reported a
+// SPOF where there were two, or one standby where there were none.
+export function supervisorInstanceId(host, hostId) {
+  return SUPERVISOR_PREFIX + (canonicalShort(String(host || '')) || 'unknown-host') + (hostId ? `-h${hostId}` : '');
+}
+// → { slug, hostId } from the part after the prefix; a legacy (pre-3.3.5) id carries no host id.
+function parseSupervisorKey(key) {
+  const m = /^(.+)-h([0-9a-f]{8})$/.exec(key);
+  return m ? { slug: m[1], hostId: m[2] } : { slug: key, hostId: null };
+}
+
 // Compute failover coverage from the bus roster (pure, so it is unit-testable). Returns the
 // online supervisor hosts and the `backups` — supervisor hosts OTHER than the leader's, i.e. the
 // boxes that could take over if the leader died (the leader's own supervisor is not its backup).
@@ -745,14 +827,18 @@ async function cmdStatus() {
 // os.hostname(). Both sides MUST be canonicalized before comparing, or a leader on an uppercase /
 // underscore host (e.g. DESKTOP-7ODO6OU) never matches its own supervisor and gets falsely counted
 // as a backup — a "capacity OK" all-clear on the exact SPOF this feature exists to warn about.
-export function failoverCoverage(instances, leaderHost) {
+// Issue 49: when both the leader and a supervisor carry a host id, the id decides; a supervisor is
+// named by its slug, with the id appended only where two share one.
+export function failoverCoverage(instances, leaderHost, leaderHostId = null) {
   const supers = (instances || []).filter(
     (i) => i.status === 'online' && String(i.instance_id).startsWith(SUPERVISOR_PREFIX),
   );
-  const hosts = [...new Set(supers.map((i) => String(i.instance_id).slice(SUPERVISOR_PREFIX.length)))].sort();
+  const keys = [...new Set(supers.map((i) => String(i.instance_id).slice(SUPERVISOR_PREFIX.length)))].sort();
+  const parsed = keys.map((key) => ({ key, ...parseSupervisorKey(key) }));
   const leaderShort = canonicalShort(String(leaderHost ?? ''));
-  const backups = hosts.filter((h) => h !== leaderShort);
-  return { hosts, backups };
+  const isLeader = (p) => p.slug === leaderShort && (!p.hostId || !leaderHostId || p.hostId === leaderHostId);
+  const name = (p) => (parsed.filter((q) => q.slug === p.slug).length > 1 ? p.key : p.slug);
+  return { hosts: parsed.map(name), backups: parsed.filter((p) => !isLeader(p)).map(name) };
 }
 
 // #6 coverage visibility: read the bus roster, count the supervisors that provide failover
@@ -764,7 +850,7 @@ async function reportCoverage(leader, token) {
     if (r.ok) instances = (await r.json()).instances || [];
   } catch { /* fail-soft: coverage is advisory */ }
 
-  const { hosts, backups } = failoverCoverage(instances, leader.host);
+  const { hosts, backups } = failoverCoverage(instances, leader.host, leader.hostId);
 
   if (!hosts.length) {
     console.log('SUPERVISORS: none registered — coverage unknown (no supervisor has reported in). ' +
@@ -802,9 +888,9 @@ async function cmdReceive(args) {
     if (req.method === 'GET' && req.url.split('?')[0] === '/cc/whoami') {
       // A standby answers the discovery challenge too (issue 55) — `migrate` probes it strictly.
       const n = new URL(req.url, 'http://x').searchParams.get('nonce');
-      const proof = n && /^[0-9a-f]{16,64}$/.test(n) && token ? { proof: whoamiProof(token, n, HOST, standbyEpoch, 0, req.socket.localAddress, req.socket.localPort) } : {};
+      const proof = n && /^[0-9a-f]{16,64}$/.test(n) && token ? { proof: whoamiProof(token, n, HOST, standbyEpoch, 0, req.socket.localAddress, req.socket.localPort, { hostId: HOST_ID }) } : {};
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ role: 'standby', host: HOST, epoch: standbyEpoch, port, ...proof }));
+      res.end(JSON.stringify({ role: 'standby', host: HOST, host_id: HOST_ID, epoch: standbyEpoch, port, ...proof }));
       return;
     }
     if (req.method === 'POST' && req.url === '/cc/import') {
@@ -1000,7 +1086,7 @@ function argOf(args, name) { const i = args.indexOf(name); return i >= 0 ? args[
 
 // Exported for the test suite (the singleton decision logic + the coverage host-matching). The
 // CLI runs only when this file is executed directly (below), so importing it for a test is inert.
-export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY, replicateSnapshot, pullSnapshot, readEpoch, writeEpoch, REPLICA_FILE, DB_FILE, HOST };
+export { supervisorLive, pidAlive, SUPERVISOR_FILE, SERVER_ENTRY, replicateSnapshot, pullSnapshot, readEpoch, writeEpoch, REPLICA_FILE, DB_FILE, HOST, HOST_ID };
 // (failoverCoverage is exported at its definition above.)
 // SERVER_ENTRY is exported so a test can assert it resolves to a file that actually exists —
 // a self-locating path that points at a missing module makes spawnLeader crash-loop the bus,
