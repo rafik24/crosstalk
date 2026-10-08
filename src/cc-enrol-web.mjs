@@ -106,7 +106,7 @@ async function enrol(path, host, req) {
 
   const bus = join(HERE, 'cc-bus.mjs').replace(/\\/g, '/');
   const message = {
-    join: `Enrolled ✓ as ${host}. New sessions on this machine join the bus automatically; this session joins the next time you start or resume it.${lan ? ' ' + bindNote() : ''}`,
+    join: `Enrolled ✓ as ${host}. New sessions on this machine join the bus automatically; this session joins the next time you start or resume it.${lan ? ' ' + bindNote() : autoSupervisor ? ` It may host the bus but listens on loopback only: if a failover lands here, your other machines cannot reach it. To host for them, add CC_BIND=0.0.0.0 to ${path} and restart the bus supervisor.` : ''}`,
     setup: `Estate created ✓ — ${host} is its first machine. ${autoSupervisor
       ? 'Start a new Claude session: it starts the bus here.'
       : `Nothing hosts the bus yet — run node "${bus}" start, or enable the auto-supervisor.`} ${lan

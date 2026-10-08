@@ -316,7 +316,7 @@ try {
       const s = await start(name, { CC_PEERS: `127.0.0.1:${LEADER}` });
       const r = await post(s, 'enrol', { password: PW, ...body });
       await within(s.exited, 3000);
-      return { status: r.status, text: existsSync(s.config) ? readFileSync(s.config, 'utf8') : '' };
+      return { status: r.status, message: r.json?.message || '', text: existsSync(s.config) ? readFileSync(s.config, 'utf8') : '' };
     };
     const off = await join1('w16-off', { action: 'join', autoSupervisor: false });
     ok(off.status === 200 && !/CC_BIND/.test(off.text) && !/CC_AUTO_SUPERVISOR/.test(off.text), 'Join with host unticked → no CC_BIND, no auto-supervisor (it never hosts)');
@@ -326,6 +326,7 @@ try {
     ok(add.status === 200 && add.text.includes(`CC_TOKEN=${KEYS.token}`) && !/CC_BIND/.test(add.text), 'Re-enrol on a hosting box with no CC_BIND → none added (no silent exposure)');
     const dflt = await join1('w16-host-default', { action: 'join', autoSupervisor: true });
     ok(dflt.status === 200 && /CC_AUTO_SUPERVISOR=1/.test(dflt.text) && !/CC_BIND/.test(dflt.text), 'Join, host ticked, reachability not sent → no CC_BIND');
+    ok(/loopback only/.test(dflt.message) && /cannot reach it/.test(dflt.message), 'the success message warns that a hosting-but-unreachable machine strands a failover');
     const nohost = await join1('w16-lan-nohost', { action: 'join', autoSupervisor: false, lan: true });
     ok(nohost.status === 200 && !/CC_BIND/.test(nohost.text), 'Join, reachable ticked but host unticked → no CC_BIND (a box that never hosts serves nothing)');
   }
