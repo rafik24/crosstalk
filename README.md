@@ -418,7 +418,7 @@ supplies only its **sink**:
 
 | agent | receiver | sink (`emit`) | wake mechanism |
 |---|---|---|---|
-| Claude Code | `src/cc-ws.mjs` (same CLI/stdout/stderr contract; two behaviour fixes below) | stdout, Monitor-sized blocks | `Monitor(cc-ws)` re-invokes the session per stdout line |
+| Claude Code | `src/cc-ws.mjs --once` (same CLI/stdout/stderr contract; two behaviour fixes below) | stdout; the task exits after a settle window | **background Bash task** (3.3.5): the task's completion re-invokes the session — only when a message for it arrives. Cursors persist across the exit → re-arm gap; exit `3` = superseded by a re-arm. (Plain `Monitor(cc-ws)` still works but Claude Code caps a Monitor at 30 min, so it wakes an idle session every 30 min to be re-armed.) |
 | Codex CLI ≥0.154 | `src/cc-codex-bridge.mjs` — one detached process per session | `codex queue --thread <session_id> --message <line>` | `codex queue` starts a turn immediately on an idle session (FIFO mid-turn) |
 | pi.dev ≥0.85 | `src/pi/crosstalk.ts` — an **in-process** extension, no daemon | `pi.sendMessage(…, {deliverAs:'steer'})` | `steer` delivers the line as a turn after the current one (immediate if idle) |
 

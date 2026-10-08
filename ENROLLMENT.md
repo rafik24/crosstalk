@@ -206,7 +206,8 @@ Then do the **first three actions** the hook prints:
 2. **Name yourself** after the task (so peers can `@mention` you):
    `node <REPO>/src/cc-name.mjs <session_id> "<what you're working on>"`
 3. **Arm receive** (persistent — this is how you get pushed messages):
-   `Monitor({ command: 'node <REPO>/src/cc-ws.mjs <your-id>', description: 'crosstalk bus', persistent: true })`
+   `Bash({ command: 'node <REPO>/src/cc-ws.mjs <your-id> --once', run_in_background: true, description: 'crosstalk bus (<your-id>)' })`
+   — exits when a message for you arrives; re-arm first, then read its output file (skill: *When the receiver task completes*).
    (`cc-ws` = WebSocket push + cursor backfill; it auto-falls back to `cc-poll` against an older leader.)
 
 ## 7. Verify send + receive

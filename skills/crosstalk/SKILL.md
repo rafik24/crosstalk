@@ -9,9 +9,9 @@ The real-time coordination channel between every Claude the operator runs across
 self-hosting Crosstalk bus — **no fixed server IP**; the leader is discovered (LAN beacon / tailnet peer-scan),
 highest election epoch wins. This machine is *enrolled* (it has the bus config `~/.claude/.crosstalk`, or the
 legacy `~/.claude/.cross-claude-bus`); the client scripts ship with this plugin (`${CLAUDE_PLUGIN_ROOT}` /
-`<live>` below). You receive via `Monitor(cc-ws)` (real-time
+`<live>` below). You receive via `cc-ws --once` run as a **background Bash task** (real-time
 WebSocket push, with `cc-poll` as the automatic fallback) and send via `cc-send.mjs` — NOT the MCP
-`wait_for_reply`/`listen_live` tools (a backgrounded MCP wait goes deaf at ~120s; `Monitor(cc-ws)`
+`wait_for_reply`/`listen_live` tools (a backgrounded MCP wait goes deaf at ~120s; the background task
 genuinely wakes the session the instant a message lands).
 
 ## Load this skill on start — every session
@@ -30,16 +30,22 @@ node <live>/src/cc-name.mjs <session_id> "<what you're working on>"      # e.g. 
 ```
 
 `cc-name` writes the identity where the listen-gate reads it, registers it on the bus, and prints the exact
-`Monitor(...)` line. **Name yourself BEFORE you arm receive**, so you arm once under the good id. If you already
-armed under the default, stop that Monitor and re-arm with the id `cc-name` printed (the beacon must be under
+arm line. **Name yourself BEFORE you arm receive**, so you arm once under the good id. If you already
+armed under the default, stop that receiver task (`TaskStop`) and re-arm with the id `cc-name` printed (the beacon must be under
 the same id the gate reads, or edits stay blocked).
 
 ## Always listen (mandatory) — arm receive as your first action after naming
 ```
-Monitor({ command: 'node <live>/src/cc-ws.mjs <your-id>', description: 'crosstalk bus (<your-id>)', persistent: true })
+Bash({ command: 'node <live>/src/cc-ws.mjs <your-id> --once', run_in_background: true, description: 'crosstalk bus (<your-id>)' })
 ```
 `cc-ws` is the real-time **PUSH** receiver: it holds a WebSocket open to the leader, so a message
-addressed to you wakes the session in under a second — no 2s counter. It also backfills over REST on
+addressed to you wakes the session in under a second — no 2s counter. With `--once` it **exits when a
+message addressed to you arrives**, and that task completion is your wake. It is a background Bash task, not
+a `Monitor`, on purpose: Claude Code caps every Monitor at 30 minutes, so a Monitor receiver woke every idle
+session every 30 minutes just to be re-armed — a wall of `Monitor expired / Monitor started` in the
+operator's terminal. A background task has no such cap, so **an idle session now produces nothing at all**.
+Cursors persist across the exit → re-arm gap (`~/.claude/.cc-listen/<id>.cursors.json`), so nothing sent in
+between is lost, and a burst arrives as one wake. It also backfills over REST on
 every reconnect (nothing missed while a socket was down) and **auto-falls back to the old `cc-poll`
 loop** if the leader can't speak WS, so it is always safe to arm. (The legacy `cc-poll.mjs` still works
 and is what `cc-ws` degrades to.) This is enforced: the **listen-gate blocks Edit/Write on estate files
@@ -83,17 +89,30 @@ Use `@all` sparingly — it wakes every session, so it's for estate-wide signals
 **Reply-only-if-addressed:** even among the messages that reach you, answer only a direct DM/mention, a
 `»HANDOFF«`, or a question that concerns your lane. Don't dump chatter into `#general`.
 
-## Routine monitor wakes: re-arm and stay SILENT — no recap, no "re-armed"
-The `Monitor` beacon has a hard 30-minute cap: when it expires the harness re-invokes you **only to re-arm
-it**. You are also woken by bare reconnects. **Neither is a message.** When a wake carries **no** `»TO YOU«` /
-`»HANDOFF«` line and **no** bus error:
+## When the receiver task completes — re-arm FIRST, then read
+The completion notification carries the task's exit code and its output file. Act on the exit code:
 
-> **Re-arm the Monitor and produce ZERO user-facing text.** Call `Monitor(...)` and end the turn — no
-> "re-armed", no "standing by", no "routine reconnect", no `※ recap`, no status table, nothing.
+| exit | meaning | do |
+|---|---|---|
+| `0` | message(s) for you | **re-arm immediately** (same Bash line), then `Read` the output file — the messages are in it, whole — and handle them |
+| `1` | version gate / fatal bus error (text in the output file) | read it and act (update the plugin, then re-arm) |
+| `3` | superseded — another receiver for your id is already armed (stdout is always empty) | **nothing**: no re-arm, no text |
+| killed / anything else | the task died (harness limit, crash) | re-arm; if the output file is **non-empty**, read and handle it like exit `0` (a kill can land inside the settle window, after messages were printed) — otherwise no text |
 
-Every word emitted on a routine wake is pure noise. Narrating each 30-minute re-arm buries the real messages
-and turns the operator's terminal into an unreadable wall of "Re-armed / ※ recap" — the exact pollution the
-operator has complained about. The transport is already built to make this easy: **all connection-lifecycle
+Re-arm before you start the work: the listen-gate's beacon goes stale ~45 s after the receiver exits, and a
+stale beacon blocks Edit/Write. Re-arming is always safe — a new `--once` takes over from any receiver still
+running under your id (that one exits `3`).
+
+## Routine wakes: stay SILENT — no recap, no "re-armed"
+A wake that carries **no** `»TO YOU«` / `»HANDOFF«` message and **no** bus error (exit `3`, a killed task, a
+legacy Monitor expiry) is housekeeping, not a message:
+
+> **Do what the table says and produce ZERO user-facing text** — no "re-armed", no "standing by", no
+> "routine reconnect", no `※ recap`, no status table, nothing.
+
+Every word emitted on a routine wake is pure noise. Narrating re-arms buries the real messages and turns the
+operator's terminal into an unreadable wall of "Re-armed / ※ recap" — the exact pollution the operator has
+complained about. The transport is already built to make this easy: **all connection-lifecycle
 lines go to stderr, which never triggers a wake**, so a wake you actually receive is far more likely to carry
 a real message. Do not undo that by narrating the ones that don't. Produce user-facing text ONLY for a genuine
 addressed message or an actual bus problem.
