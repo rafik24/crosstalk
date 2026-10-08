@@ -100,11 +100,13 @@ command that opens a local page in your browser (`127.0.0.1`, one-time link), an
 right form for this machine:
 
 - **Join your estate** — an estate answered on the network: enter its password. "Let this machine
-  host the bus when needed" (default on) also makes it reachable (`CC_BIND=0.0.0.0`), so a
-  failover never lands on a loopback-only leader; terminal: `--auto-supervisor` (`--no-lan` to opt out).
-- **Set up a new estate** — nothing answered: choose a password (≥16 chars, confirmed). "Let other
-  machines on this network join" (default on) writes `CC_BIND=0.0.0.0` so the others can reach this
-  machine's bus — still token-authenticated, with proof-authenticated discovery. If you
+  host the bus when needed" (default on) plus "Make its bus reachable…" — so a failover never
+  lands on a loopback-only leader. With a tailnet that is on by default and binds the tailnet
+  address; without one it would bind every network (`CC_BIND=0.0.0.0`), so it is off unless ticked.
+  Terminal: `--auto-supervisor` (tailnet bind), `--lan` (0.0.0.0), `--no-lan`.
+- **Set up a new estate** — nothing answered: choose a password (≥16 chars, confirmed). "Let my
+  other machines join" — the same rule: the tailnet address by default, `0.0.0.0` only when ticked,
+  and the page words what each exposes (ENROLLMENT.md §3). If you
   already use Crosstalk elsewhere, get on the same network or tailnet and reload instead: setting up
   here creates a separate estate.
 - **Already enrolled** — **Change estate password** (also how a pre-3.3.5 raw-token estate moves to

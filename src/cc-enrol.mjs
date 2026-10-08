@@ -12,9 +12,10 @@
 //   node cc-enrol.mjs --token <tok>   the pre-3.3.5 way: write a raw token, no derivation (≥32 chars)
 //   options: --auto-supervisor  (also set CC_AUTO_SUPERVISOR=1)   --no-verify  (write without
 //            finding a leader — for the FIRST box of a brand-new estate)   --config <path>
-//            --lan / --no-lan  (CC_BIND=0.0.0.0 or not, so other machines can reach this box's bus
-//            when it hosts). Default: on whenever the auto-supervisor is (a box that may host must
-//            be reachable, or a failover strands the estate — #60); an existing CC_BIND is kept
+//            --lan / --no-lan  (make this box's bus reachable when it hosts, or not: the tailnet
+//            address when there is one, else CC_BIND=0.0.0.0). Default: the auto-supervisor implies
+//            a TAILNET bind only (#60) — every-interface exposure is only ever --lan. A re-enrol /
+//            --set-password never adds a bind; an existing CC_BIND is kept
 //
 // The usual way in is the browser page (/crosstalk:enrol → cc-enrol-web.mjs), which calls the
 // exported core below; this CLI is the headless/SSH fallback (same core, same rules).
@@ -33,7 +34,8 @@
 // box untouched — it never half-enrols with a key nobody else has.
 // ---------------------------------------------------------------------------
 import { scryptSync } from 'node:crypto';
-import { existsSync, writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, mkdirSync, chmodSync, renameSync, rmSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { configPath } from './cc-paths.mjs';
@@ -65,11 +67,34 @@ function askHidden(question) {
   });
 }
 
+// Atomic (tmp + rename): a write that fails half-way (disk full, file locked) must leave the old
+// config intact — the page's "nothing was written" must be true.
 function writeConfig(path, lines) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, lines.join('\n') + '\n', { mode: 0o600 });
-  try { chmodSync(path, 0o600); } catch {}
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, lines.join('\n') + '\n', { mode: 0o600 });
+    try { chmodSync(tmp, 0o600); } catch {}
+    renameSync(tmp, path);
+  } catch (e) { try { rmSync(tmp, { force: true }); } catch {} throw e; }
 }
+
+// This machine's tailnet address (Tailscale/Headscale CGNAT range 100.64.0.0/10), or null. A bus
+// that must be reachable binds THERE when it can: reachable by the estate's machines over the
+// tailnet, invisible on whatever café Wi-Fi the laptop is on (crosstalk-reviewer 2026-10-08).
+export function tailnetAddress(ifaces = networkInterfaces()) {
+  // Tests pin the answer ('none' or an address), as they do the password (CC_ENROL_PASSWORD_FOR_TESTS).
+  const forced = process.env.CC_ENROL_TAILNET_FOR_TESTS;
+  if (forced !== undefined) return forced === 'none' ? null : forced;
+  for (const list of Object.values(ifaces || {})) for (const a of list || []) {
+    if (a.internal || (a.family !== 'IPv4' && a.family !== 4)) continue;
+    const [o1, o2] = String(a.address).split('.').map(Number);
+    if (o1 === 100 && o2 >= 64 && o2 <= 127) return a.address;
+  }
+  return null;
+}
+// The CC_BIND a reachable bus gets: the tailnet address when there is one, else every interface.
+export function reachableBind() { return tailnetAddress() || '0.0.0.0'; }
 
 // --- the enrolment core, shared by this CLI and the browser page (cc-enrol-web.mjs) -------------
 // Exported so the page reuses the SAME derivation, verification and file write: the crypto and
@@ -101,25 +126,27 @@ export async function verifyToken(token) {
 // Write the enrolment. rewrite=true (set-password / re-enrol) keeps every line of the existing
 // file except the two keys; a fresh enrolment writes just the keys (+ the supervisor opt-in).
 const ENROLMENT_HEADER = '# Crosstalk bus — per-machine enrolment (written by cc-enrol; keys derived from the estate password, never the password itself)';
-// CC_BIND=0.0.0.0 makes the bus this box hosts listen beyond loopback. Every request still needs
-// the estate token, and a client only adopts a leader that proves it holds that token (cc-proof).
-// lan: true / false decides explicitly. Left undefined, it follows hosting: a box whose file turns
-// the auto-supervisor on MAY become the leader on failover, and a loopback-only leader strands
-// every other machine (#60) — so it gets CC_BIND=0.0.0.0; a box that never hosts gets none.
-// An existing CC_BIND is never overridden (e.g. a tailnet IP chosen by hand).
-const setsAutoSupervisor = (l) => /^\s*(export\s+)?CC_AUTO_SUPERVISOR\s*=\s*["']?1["']?\s*$/.test(l);
+// CC_BIND makes the bus this box hosts listen beyond loopback (#60) — on the tailnet address when
+// there is one, else on every interface (0.0.0.0). /api/* needs the estate token and a client only
+// adopts a leader that proves it holds it (cc-proof), but /health, /console, /openapi.json and
+// /cc/whoami answer anyone who can reach the port — so reachability is chosen, never slipped in.
+// lan: true / false decides explicitly (true without a tailnet = 0.0.0.0). Left undefined on a FRESH
+// enrolment it follows hosting — but only onto a TAILNET address: a box that may become leader must
+// be reachable (#60), yet every-interface exposure is only ever an explicit choice (--lan / the box).
+// A REWRITE (set-password / re-enrol) never adds a bind on its own; an existing CC_BIND is never
+// overridden (e.g. an address chosen by hand).
 export function writeEnrolment(path, { token, admin, autoSupervisor = false, lan, rewrite = false }) {
   const keep = [];
   if (rewrite) {   // our own header is re-emitted below — keeping it too stacked one copy per rewrite
     for (const l of readFileSync(path, 'utf8').split(/\r?\n/)) if (l.trim() && l !== ENROLMENT_HEADER && !/^\s*(export\s+)?CC_(TOKEN|ADMIN_KEY)\s*=/.test(l)) keep.push(l);
   }
-  const bind = lan ?? (autoSupervisor || keep.some(setsAutoSupervisor));
+  const bind = lan ?? (!rewrite && autoSupervisor && !!tailnetAddress());
   writeConfig(path, [
     ENROLMENT_HEADER,
     `CC_TOKEN=${token}`,
     ...(admin ? [`CC_ADMIN_KEY=${admin}`] : []),
     ...(autoSupervisor && !keep.some((l) => /CC_AUTO_SUPERVISOR/.test(l)) ? ['CC_AUTO_SUPERVISOR=1'] : []),
-    ...(bind && !keep.some((l) => /^\s*(export\s+)?CC_BIND\s*=/.test(l)) ? ['CC_BIND=0.0.0.0'] : []),
+    ...(bind && !keep.some((l) => /^\s*(export\s+)?CC_BIND\s*=/.test(l)) ? [`CC_BIND=${reachableBind()}`] : []),
     ...keep,
   ]);
 }

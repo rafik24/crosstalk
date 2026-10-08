@@ -10,6 +10,7 @@
 //   5. Codex `apply_patch` with a fresh beacon          → exit 0
 //   6. patchPaths() parses Update/Add/Delete/Move headers of a multi-file patch
 //   8. a discovery enrolment (CC_TOKEN, NO CC_BASE) is gated too (#59); no config / no token → allowed
+//   9. no CC_ESTATE → only git-work-tree files are gated (never ~/.claude / temp), runnable hint
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -94,6 +95,32 @@ ok(r.code === 0, '5: Codex apply_patch on estate path with a fresh beacon → al
   const noTok = join(HOME, 'notoken.cfg');
   writeFileSync(noTok, 'CC_ESTATE=D:/estate/app\n');
   ok(run(noTok).status === 0, '8c: a config with no CC_TOKEN is not an enrolment → allowed');
+  writeFileSync(beacon, String(Date.now()));
+}
+
+// 9: NO CC_ESTATE (what every cc-enrol enrolment writes) — the gate covers code (a git work tree)
+//    only, never the harness's own files or scratch; and its hint is a runnable line, not a
+//    '<cc-ws.mjs>' placeholder (crosstalk-reviewer 2026-10-08: it blocked EVERY write on the box).
+{
+  const bare = join(HOME, 'bare.cfg');
+  writeFileSync(bare, 'CC_TOKEN=tt\nCC_AUTO_SUPERVISOR=1\nCC_BIND=0.0.0.0\n');
+  const run = (file, cfgPath = bare, env = {}) => spawnSync(process.execPath, [GATE], { input: JSON.stringify({ session_id: SID, tool_name: 'Write', tool_input: { file_path: file } }), encoding: 'utf8', env: { ...process.env, HOME, USERPROFILE: HOME, CC_BUS_CONFIG: cfgPath, CC_LISTEN_BYPASS: '', CC_TOKEN: '', ...env } });
+  const old4 = new Date(Date.now() - 120000); utimesSync(beacon, old4, old4);
+  const inRepo = join(__dirname, '..', 'src', 'some-new-file.mjs');   // this checkout is a git work tree
+  const blocked = run(inRepo);
+  ok(blocked.status === 2 && /NOT listening/.test(blocked.stderr), '9a: no CC_ESTATE, a file in a git work tree, no beacon → BLOCKED');
+  // a CLAUDE session (the shared SID above is a Codex id, whose hint is the bridge)
+  const CSID = 'cccccccc-1111-4222-8333-444444444444';
+  writeFileSync(join(listenDir, CSID + '.id'), 'testbox/claude-lane-cccccccc');
+  const ch = spawnSync(process.execPath, [GATE], { input: JSON.stringify({ session_id: CSID, tool_name: 'Write', tool_input: { file_path: inRepo } }), encoding: 'utf8', env: { ...process.env, HOME, USERPROFILE: HOME, CC_BUS_CONFIG: bare, CC_LISTEN_BYPASS: '', CC_TOKEN: '' } });
+  ok(ch.status === 2 && /node [^ ]*cc-ws\.mjs [^ ]+ --once/.test(ch.stderr) && !/<cc-ws\.mjs>/.test(ch.stderr), '9b: a Claude session hint names the real cc-ws.mjs path with --once (no <placeholder>)');
+  ok(run(join(HOME, '.claude', 'projects', 'x', 'memory', 'note.md')).status === 0, '9c: no CC_ESTATE, ~/.claude (session memory) → allowed');
+  ok(run(join(tmpdir(), 'scratch.txt')).status === 0, '9d: no CC_ESTATE, the temp dir → allowed');
+  ok(run(process.platform === 'win32' ? 'Z:\\no-such-dir\\notes.md' : '/no-such-dir/notes.md').status === 0, '9e: no CC_ESTATE, outside any git work tree → allowed');
+  // 9f: a pinned CC_BASE config whose token comes only from the ENVIRONMENT is enrolled too
+  const pinned = join(HOME, 'pinned.cfg');
+  writeFileSync(pinned, 'CC_BASE=http://127.0.0.1:1\n');
+  ok(run(inRepo, pinned, { CC_TOKEN: 'from-env' }).status === 2, '9f: CC_BASE in the file + CC_TOKEN only in the env → still gated');
   writeFileSync(beacon, String(Date.now()));
 }
 

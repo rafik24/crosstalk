@@ -104,16 +104,21 @@ always switch between Join and Set up by hand; every write is still gated as bel
 typed only in the browser — never into the chat — and the page's server is loopback-only, token-,
 Host- and Origin-checked, and exits after one enrolment, Cancel, or 5 minutes idle.
 
-A new estate's first machine must be reachable by the others. Its bus binds loopback unless the
-config sets `CC_BIND`, so Set up's **"Let other machines on this network join"** (default on;
-terminal: `--lan`) writes `CC_BIND=0.0.0.0`, the setting the existing estate uses. That exposure is
-authenticated both ways: every request needs the estate token, and discovery only adopts a leader
-that proves it holds it. Untick it for a single-machine estate (no `CC_BIND`: loopback only); you
-can add `CC_BIND=0.0.0.0` later and restart the supervisor. The same holds for **every machine
-that may host**: a failover must never land on a loopback-only leader. So Join's "Let this machine
-host the bus when needed" (terminal: `--auto-supervisor`, opt out with `--no-lan`) also writes
-`CC_BIND=0.0.0.0`, and so does a re-enrol of a machine whose config has `CC_AUTO_SUPERVISOR=1`. A
-machine that never hosts gets none, and an existing `CC_BIND` (say, a tailnet IP) is never replaced.
+A new estate's first machine — and **every machine that may host** (a failover must never land on
+a loopback-only leader) — must be reachable by the others. Its bus binds loopback unless the config
+sets `CC_BIND`, and reachability is always an explicit, worded choice:
+
+- **With a tailnet** (an address in `100.64.0.0/10`), Set up's **"Let my other machines join"** and
+  Join's **"Make its bus reachable…"** default ON and write `CC_BIND=<the tailnet address>`:
+  reachable by your tailnet's machines only. Terminal: hosting (`--auto-supervisor`) implies it.
+- **Without one**, the only way to be reachable is every interface, `CC_BIND=0.0.0.0` — which also
+  means public Wi-Fi the laptop later joins. `/api/*` still needs the estate token and discovery
+  only adopts a leader that proves it holds it, but `/health`, `/console`, `/openapi.json` and
+  `/cc/whoami` answer anyone who reaches the port. So it is OFF by default and only ever written
+  when ticked (terminal: `--lan`), and the success message says what it exposes.
+
+A re-enrol or password change never adds or changes a bind, and an existing `CC_BIND` (say, an
+address chosen by hand) is never replaced. A machine that never hosts gets none.
 
 **Headless / SSH: the terminal fallback.** The same core, with a hidden prompt:
 
@@ -126,7 +131,8 @@ node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
 
 The keys are derived from the password (never stored) and verified against a leader that proves
 it holds them, so a typo cannot half-enrol the box. First box of a brand-new estate (no leader
-yet): `cc-enrol --no-verify --lan` (`--lan` writes `CC_BIND=0.0.0.0` so other machines can reach it). Switching an old raw-token estate to a password: on one enrolled box
+yet): `cc-enrol --no-verify --auto-supervisor` (binds the tailnet address when there is one; add
+`--lan` for `CC_BIND=0.0.0.0` on a network without a tailnet). Switching an old raw-token estate to a password: on one enrolled box
 `cc-enrol --set-password` (page: **Change estate password**), restart its supervisor, then
 `cc-enrol --re-enrol` (page: **Re-enrol**) on every other box in the same sitting (until then the estate is split: old-token boxes will not trust the new leader). The
 password must be ≥16 chars — a passphrase of four or more random words. Windows: run the prompt from
@@ -205,9 +211,10 @@ to be listening — **recommended but optional** (fail-open; enforces "every ses
 Replace `<REPO>` with the absolute clone path (forward slashes). If you already have hooks,
 **merge** these into the existing `SessionStart` / `PreToolUse` arrays rather than replacing.
 The listen-gate is fail-open (any error / not-enrolled → allow) and can be bypassed once with
-`CC_LISTEN_BYPASS=1`. "Enrolled" means the config holds a `CC_TOKEN` — a discovery or password
-enrolment (no `CC_BASE`) is gated too (before 3.3.5 only a `CC_BASE`-pinned machine was). Without
-`CC_ESTATE` in the config, it gates every file the session edits.
+`CC_LISTEN_BYPASS=1`. "Enrolled" means the config holds a `CC_TOKEN` (or pins `CC_BASE`) — a
+discovery or password enrolment (no `CC_BASE`) is gated too (before 3.3.5 only a `CC_BASE`-pinned
+machine was). `CC_ESTATE` scopes it to that directory; without it, it gates files inside a **git
+work tree** — never `~/.claude` (session memory, plans) or the temp dir.
 
 > **No `CC_BASE` needed.** The SessionStart hook (`cc-join.sh`) discovers the leader itself —
 > the same `cc-discover.mjs` path every `cc-*.mjs` client uses (`resolveFast` → `resolveFull`:
@@ -305,11 +312,12 @@ Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load 
 - **The listen-gate goes live on password-enrolled machines.** Before 3.3.5 it only gated a machine
   whose config pinned `CC_BASE`; a discovery or password enrolment has none, so the gate allowed
   everything there. Now any config with a `CC_TOKEN` is gated: a session that has not armed
-  `cc-ws` is blocked from editing. Without `CC_ESTATE` in the config, that means **every file** it
-  edits. Set `CC_ESTATE=<your projects dir>` to scope it.
-- **A machine that may host must be reachable.** New enrolments with the auto-supervisor on write
-  `CC_BIND=0.0.0.0` (§3). An already-enrolled machine is not changed until it re-enrols, so check
-  that every box with `CC_AUTO_SUPERVISOR=1` also has a `CC_BIND`.
+  `cc-ws` is blocked from editing code — files inside a git work tree, or inside `CC_ESTATE` when
+  the config sets it (`~/.claude` and the temp dir are never gated).
+- **A machine that may host must be reachable** (§3): on a tailnet, new enrolments with the
+  auto-supervisor bind the tailnet address; without one, `0.0.0.0` is an explicit choice. A
+  re-enrol never changes the bind, so check by hand that every box with `CC_AUTO_SUPERVISOR=1`
+  also has a `CC_BIND`.
 - **Discovery is authenticated.** During the rollout sitting, set `CC_DISCOVERY_PROOF=legacy` while
   a pre-3.3.5 leader still serves, and remove it the same sitting (see Troubleshooting).
 
