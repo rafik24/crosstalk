@@ -26,7 +26,7 @@
 // Lifecycle chatter goes to `log` (stderr by default), NEVER to stdout: a Monitor treats every
 // stdout line as a wake event. Zero deps (Node's built-in WebSocket client).
 // ---------------------------------------------------------------------------
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveFast, resolveFull } from './cc-discover.mjs';
@@ -35,6 +35,17 @@ import { addressedTo, renderLine } from './cc-render.mjs';
 
 export const LIVE_DIR = join(homedir(), '.claude', '.cc-listen');
 export function beaconPath(instance) { return join(LIVE_DIR, instance.replace(/[^A-Za-z0-9._-]/g, '_')); }
+// Persisted cursors (opt-in, `cursorFile`): a receiver that EXITS between wakes (cc-ws --once) must
+// resume where it stopped, or everything sent between its exit and the re-arm would be seeded past
+// and lost. A file older than this is ignored (seed fresh) — replaying a stale session's backlog
+// into a new one is worse than starting at the tip.
+// One file per receive SCOPE, so a `--channel X` arm never clobbers (or is misread as) the default
+// addressed-only arm's state under the same id.
+export function cursorPath(instance, scope = '') {
+  const tag = scope ? '.' + scope.replace(/[^A-Za-z0-9._-]/g, '_') : '';
+  return beaconPath(instance) + tag + '.cursors.json';
+}
+export const CURSOR_MAX_AGE_MS = Number(process.env.CC_CURSOR_MAX_AGE_MS || 6 * 3600 * 1000);
 
 const RETRY_MS = Number(process.env.CC_RETRY_MS || 5000);           // first re-emit after a failure
 const RETRY_MAX_MS = 60000;
@@ -55,6 +66,9 @@ export function createReceiver(opts) {
     onVersionGate = null,
     // Called when a message exhausts its retries (parked). Default: log only.
     onParked = null,
+    // Path to persist per-channel cursors across process restarts (null = in-memory only, the
+    // long-lived Monitor/bridge default). See cursorPath().
+    cursorFile = null,
   } = opts;
   if (!instance || typeof emit !== 'function') throw new Error('createReceiver: instance + emit are required');
 
@@ -118,8 +132,11 @@ export function createReceiver(opts) {
     process.exit(1);
   }
 
+  // Bounded: a half-open connection to a leader that just died must not hang a backfill (and, under
+  // --once, the exit that waits on it) for undici's ~300s default.
+  const REST_TIMEOUT_MS = Number(process.env.CC_REST_TIMEOUT_MS || 30000);
   async function j(path, o = {}) {
-    const r = await fetch(BASE + path, { ...o, headers: { ...H, ...(o.headers || {}) } });
+    const r = await fetch(BASE + path, { signal: AbortSignal.timeout(REST_TIMEOUT_MS), ...o, headers: { ...H, ...(o.headers || {}) } });
     // A version-gate 426 on ANY /api call is fatal — surface it now, don't spin silently.
     if (r.status === 426) { let info = {}; try { info = await r.json(); } catch {} failVersionGate(info); }
     if (!r.ok) throw new Error(path + ' → ' + r.status);
@@ -149,6 +166,63 @@ export function createReceiver(opts) {
     const s = (seen[m.channel] ??= new Map());
     s.delete(m.id); s.set(m.id, sigOf(m));
     while (s.size > SEEN_CAP) s.delete(s.keys().next().value);
+  }
+
+  // --- persisted cursors (opt-in, `cursorFile`; cc-ws --once) ---
+  // The file carries the whole dedup state a restart would otherwise lose, not just the cursors:
+  //   • epoch — so a leader TERM change during the exit → re-arm gap is still noticed and
+  //     reconciled (issue 46). Without it a rewound-then-re-issued id under the saved cursor was
+  //     silently dropped (crosstalk-reviewer F1, 2026-10-08);
+  //   • seen — the newest signatures per channel, so that reconcile can tell "intact" from
+  //     "rewound"; with an empty ring it judged EVERY message new and re-delivered whole channels (F2);
+  //   • channels — every channel the last backfill listed, so a channel absent from `cursors` is
+  //     told apart: listed-but-unseeded (a failed seed fetch) seeds at the tip; never listed =
+  //     created during the gap, replayed whole (only addressed messages emit) (F5);
+  //   • scope — the receive scope (--channel / --all / addressed); a file written under another
+  //     scope is ignored, since its channel list means something else (F5).
+  // A restored receiver starts SEEDED: its gap is replayed through consider(), never skipped.
+  const SCOPE = only ? `channel:${only}` : firehose ? 'all' : 'addressed';
+  const SEEN_PERSIST = 16;   // newest signatures per channel kept on disk (the rewind check needs the newest)
+  let restored = false;
+  const knownChannels = new Set();
+  const knownChannelsAtLoad = new Set();   // the restored file's list — "old" channels, frozen at load
+  function loadCursors() {
+    if (!cursorFile || fromStart) return;
+    try {
+      const d = JSON.parse(readFileSync(cursorFile, 'utf8'));
+      if (!d || d.v !== 2 || d.scope !== SCOPE || typeof d.cursors !== 'object' || !Number.isFinite(d.epoch)) return;
+      if (!(Date.now() - Number(d.saved_at) < CURSOR_MAX_AGE_MS)) return;
+      for (const [ch, id] of Object.entries(d.cursors)) if (Number.isInteger(id) && id >= 0) cursors[ch] = id;
+      for (const [ch, pairs] of Object.entries(d.seen || {})) {
+        if (!Array.isArray(pairs)) continue;
+        const m = (seen[ch] = new Map());
+        for (const [id, sig] of pairs) if (Number.isInteger(id) && typeof sig === 'string') m.set(id, sig);
+      }
+      for (const ch of Array.isArray(d.channels) ? d.channels : []) if (typeof ch === 'string') { knownChannels.add(ch); knownChannelsAtLoad.add(ch); }
+      leaderEpoch = d.epoch;   // ensureBase() compares the live leader against this → reconcile on a change
+      seeded = restored = true;
+      log(`[resumed ${Object.keys(cursors).length} cursor(s) @ epoch ${d.epoch} from ${cursorFile}]`);
+    } catch {}
+  }
+  let saveTimer = null;
+  function saveCursors({ force = false } = {}) {
+    if (!cursorFile || (stopped && !force) || leaderEpoch === null) return;
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    try {
+      mkdirSync(LIVE_DIR, { recursive: true });
+      const seenOut = {};
+      for (const [ch, m] of Object.entries(seen)) if (m.size) seenOut[ch] = [...m].slice(-SEEN_PERSIST);
+      const tmp = cursorFile + '.' + process.pid + '.tmp';
+      writeFileSync(tmp, JSON.stringify({ v: 2, saved_at: Date.now(), scope: SCOPE, epoch: leaderEpoch, channels: [...knownChannels], cursors, seen: seenOut }));
+      renameSync(tmp, cursorFile);          // atomic: a kill mid-write never leaves a torn file
+    } catch {}
+  }
+  // Throttled: cursors move on every message; a kill between saves only means a short re-scan
+  // (dedup by cursor makes that replay-safe for anything the file already covers). Never after
+  // stop(): a backfill still in flight must not persist cursors for messages it will not deliver (F3).
+  function touchCursors() {
+    if (!cursorFile || saveTimer || stopped) return;
+    saveTimer = setTimeout(() => saveCursors(), 1000); saveTimer.unref?.();
   }
 
   // --- direct retry queue for failed emits (the cursor is NEVER rolled back) ---
@@ -211,6 +285,7 @@ export function createReceiver(opts) {
     const cur = cursors[ch] ?? 0;
     if (msg.id <= cur) return;
     cursors[ch] = Math.max(cur, msg.id);
+    touchCursors();
     admit(msg);
   }
   // Remember + maybe deliver, with NO cursor test (reconcileTerm feeds re-issued ids through here).
@@ -293,17 +368,26 @@ export function createReceiver(opts) {
     for (const c of channels) {
       const after = cursors[c.name] ?? 0;
       let res;
+      // Recorded BEFORE the fetch: a channel whose seed fetch fails must still be saved as "listed",
+      // or the next run would take it for one created in the gap and replay its whole history.
+      knownChannels.add(c.name);
       try { res = await j(`/api/messages/${encodeURIComponent(c.name)}?after_id=${after}`); }
       catch { continue; }
-      if (isSeed && !fromStart && cursors[c.name] === undefined) {
+      if (stopped) return;   // never advance (or persist) cursors for messages that won't be delivered (F3)
+      // A channel the last run LISTED but never seeded (a failed seed fetch) is old, not new: seed it at
+      // the tip like a fresh listener would, rather than replaying its whole history (F5).
+      const seedRestored = restored && cursors[c.name] === undefined && knownChannelsAtLoad.has(c.name);
+      if ((isSeed && !fromStart && cursors[c.name] === undefined) || seedRestored) {
         cursors[c.name] = res.last_id || 0;
         for (const m of res.messages.slice(-SEEN_CAP)) remember(m);   // skipped, but KNOWN — a later rewind check needs them
         continue;
       }
       for (const m of res.messages.sort((a, b) => a.id - b.id)) consider(m);
+      if (stopped) return;
       if (cursors[c.name] === undefined) cursors[c.name] = res.last_id || 0;
     }
     seeded = true;
+    touchCursors();
   }
 
   // --- poll fallback: used only until/unless a WS connects ---
@@ -361,6 +445,7 @@ export function createReceiver(opts) {
   async function start() {
     // A version-gate 426 during any of these awaits stops the receiver; nothing after it may run
     // (the next register() would re-create the beacon the gate just deleted).
+    loadCursors();
     await ensureBase(true);           if (stopped) return;
     await register();                 if (stopped) return;
     await backfill();                 if (stopped) return;
@@ -369,15 +454,20 @@ export function createReceiver(opts) {
     log(`[listening as ${instance} on ${only ? '#' + only : 'all channels'} @ ${BASE || 'discovering…'} (push+backfill)]`);
     regIv = setInterval(register, 20000);   // presence + beacon heartbeat, independent of transport
   }
-  function stop() {
+  // stop({ save: false }): a superseded --once receiver must not overwrite the new owner's cursors.
+  function stop({ save = true } = {}) {
     stopped = true;
     stopPoll();
     if (regIv) { clearInterval(regIv); regIv = null; }
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     if (retryTimerR) { clearTimeout(retryTimerR); retryTimerR = null; }
+    // The final flush is the ONLY save after stop(), and only when asked: a superseded receiver
+    // (save:false) must not overwrite the new owner's file.
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    if (save && cursorFile) saveCursors({ force: true });
     try { ws && ws.close(); } catch {}
     ws = null;
   }
 
-  return { start, stop, backfill, register, beat, consider, cursors, get pending() { return retryQ.size; }, get base() { return BASE; }, beaconFile: LIVE_FILE };
+  return { start, stop, backfill, register, beat, consider, cursors, saveCursors, get pending() { return retryQ.size; }, get base() { return BASE; }, beaconFile: LIVE_FILE };
 }

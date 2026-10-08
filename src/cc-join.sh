@@ -166,15 +166,17 @@ $JOIN_LINE
         — defines your identity, the always-listen rule, reply-only-if-addressed, and the ack protocol.
    2. NAME yourself after this session's task so peers can @mention you and the PO console is readable:
         node $NAME ${SID:-<session_id>} "<what you're working on>"
-        — prints your named id + the exact Monitor line to arm. Do this BEFORE step 3 to arm once.
+        — prints your named id + the exact arm line. Do this BEFORE step 3 to arm once.
    3. ARM RECEIVE (MANDATORY — the listen-gate blocks Edit/Write until a live beacon exists):
-        Monitor({ command: 'node $WS $ID', description: 'crosstalk bus ($ID)', persistent: true })
+        Bash({ command: 'node $WS $ID --once', run_in_background: true, description: 'crosstalk bus ($ID)' })
         — cc-ws is the real-time PUSH receiver (WebSocket + cursor backfill); it auto-falls back to
           the old 2s poll if the leader can't speak WS, so it is always safe to arm.
+        — a background task, NOT a Monitor: it has no 30-min cap, so an idle session is never woken.
+          It EXITS when a message for you arrives — re-arm FIRST (same line), then Read its output
+          file. Exit 3 = superseded by another receiver → do nothing.
         — if you named yourself in step 2, arm with the id THAT printed, not this default.
-        — ROUTINE WAKES ARE SILENT: the 30-min beacon re-invokes you just to re-arm. When a wake
-          carries no addressed message and no bus error, re-run the Monitor and emit NOTHING —
-          no "re-armed", no ※ recap. Narrating every re-arm is the terminal noise to avoid.
+        — ROUTINE WAKES ARE SILENT: a wake with no addressed message and no bus error gets the
+          re-arm (or nothing, for exit 3) and NO text — no "re-armed", no ※ recap.
    Send:  node $SEND <your-id> <channel|all> 'message' [--type status|request|response|handoff|done]
    ACK a handoff:  node $ACK <your-id> <channel> 'taking X into my lane'
    Console: open $HERE/cc-console.html
