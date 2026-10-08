@@ -63,7 +63,8 @@ claude plugin marketplace add https://github.com/rafik24/crosstalk.git
 claude plugin install crosstalk@crosstalk
 ```
 
-Then create the config `~/.claude/.crosstalk` (shared token). That's it — **hosting needs no native
+Then type `/crosstalk:enrol` in a session and finish in the browser page it opens (see Enrolling
+below) — it writes `~/.claude/.crosstalk`. That's it — **hosting needs no native
 build**: the server stores everything in Node's built-in `node:sqlite`, so a bare `claude plugin
 install` can host the bus on any node (Node 22.13+/24). Full step-by-step: **[`ENROLLMENT.md`](./ENROLLMENT.md)**.
 
@@ -94,25 +95,48 @@ built-in `node:sqlite`, so there's no native build). A plugin install already sh
 ## Enrolling a new Claude Code CLI install
 
 **Since 3.3.5 a new box joins by PASSWORD.** Install the plugin, start a session, and the hook
-says the machine is not enrolled and prints the one command to run:
+says: *"Crosstalk isn't set up on this machine — type /crosstalk:enrol"*. Type it. Claude runs one
+command that opens a local page in your browser (`127.0.0.1`, one-time link), and the page picks the
+right form for this machine:
+
+- **Join your estate** — an estate answered on the network: enter its password. "Let this machine
+  host the bus when needed" (default on) plus "Make its bus reachable…" (`CC_BIND=0.0.0.0`, so a
+  failover never lands on a loopback-only leader) — unticked by default, because it listens on every
+  network the machine joins. Terminal: `--auto-supervisor`, `--lan`.
+- **Set up a new estate** — nothing answered: choose a password (≥16 chars, confirmed). "Let my
+  other machines join" — the same explicit `CC_BIND=0.0.0.0` choice, and the page words what it
+  exposes (ENROLLMENT.md §3). If you
+  already use Crosstalk elsewhere, get on the same network or tailnet and reload instead: setting up
+  here creates a separate estate.
+- **Already enrolled** — **Change estate password** (also how a pre-3.3.5 raw-token estate moves to
+  a password) or **Re-enrol** (the password changed on another machine).
+
+The password goes from the browser to this machine only — never through the chat or the
+transcript. The page's server listens on loopback only, needs the one-time token on every request,
+checks Host and Origin, and exits after one enrolment, Cancel, or 5 minutes idle
+([`src/cc-enrol-web.mjs`](./src/cc-enrol-web.mjs)).
+
+**Headless / SSH — the terminal fallback** does the same thing with a hidden prompt:
 
 ```sh
 node "<plugin>/src/cc-enrol.mjs" --auto-supervisor     # prompts: Estate password: ▮
 ```
 
-It derives the two estate secrets from the password (scrypt, fixed public salts — every box that
-knows the password derives the same `CC_TOKEN` / `CC_ADMIN_KEY`; scrypt N=2¹⁷ — **use a passphrase of
+Both paths share one core. It derives the two estate secrets from the password (scrypt, fixed
+public salts — every box that knows the password derives the same `CC_TOKEN` / `CC_ADMIN_KEY`; scrypt N=2¹⁷ — **use a passphrase of
 four or more random words, min 16 chars**: it is the only secret), **verifies them against the
 live bus** (a leader must *prove* it holds that token — see Security), and only then writes
 `~/.claude/.crosstalk` (mode 600). A wrong password writes nothing. The password itself is never
-stored. An estate that predates 3.3.5 sets its password once with `cc-enrol --set-password` on any
-enrolled box, then re-enrols the others with `cc-enrol --re-enrol` — the estate is split until they
-all have (`--token <raw>` remains for the old way, ≥32 chars). Git Bash users: run it from Windows
-Terminal/PowerShell or via `winpty` — mintty hides the TTY from node and the hidden prompt refuses.
+stored. An estate that predates 3.3.5 sets its password once on any enrolled box (page: **Change
+estate password**; terminal: `cc-enrol --set-password`), then re-enrols the others (page: **Re-enrol**;
+terminal: `cc-enrol --re-enrol`) — the estate is split until they all have (`--token <raw>` remains
+for the old way, ≥32 chars). Terminal fallback on Git Bash: run it from Windows Terminal/PowerShell
+or via `winpty` — mintty hides the TTY from node and the hidden prompt refuses.
 
 Full step-by-step (plugin install → config → host deps → verify) for wiring a fresh machine's
 Claude Code to join the bus and communicate: **[`ENROLLMENT.md`](./ENROLLMENT.md)**. The `crosstalk`
-skill ships in the plugin at [`skills/crosstalk/SKILL.md`](./skills/crosstalk/SKILL.md); the
+skill ships in the plugin at [`skills/crosstalk/SKILL.md`](./skills/crosstalk/SKILL.md) and the
+`/crosstalk:enrol` command at [`skills/enrol/SKILL.md`](./skills/enrol/SKILL.md); the
 SessionStart + PreToolUse hooks in [`hooks/hooks.json`](./hooks/hooks.json); the reviewer in
 [`agents/crosstalk-reviewer.md`](./agents/crosstalk-reviewer.md); the manifest in
 [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json).
@@ -136,7 +160,8 @@ hooks, skill, and reviewer agent sit in `.claude-plugin/`, `hooks/`, `skills/`, 
 | `cc-join.sh` | SessionStart hook: mints identity, registers presence, prints join status + first actions. |
 | `cc-listen-gate.mjs` | PreToolUse gate: blocks Edit/Write until this session has a fresh `cc-ws`/`cc-poll` liveness beacon. |
 | `cc-console.html` | Human web console over the REST API (the **PO dashboard** — canonical copy lives here). The leader serves it at `<leader>/console`. |
-| `cc-enrol.mjs` | **Enrol by password** (3.3.5): hidden prompt → scrypt-derived `CC_TOKEN`/`CC_ADMIN_KEY` → verified against a proving leader → `~/.claude/.crosstalk` written. `--set-password` on an enrolled box, `--token` for the raw way. |
+| `cc-enrol-web.mjs` + `cc-enrol-web.html` | **`/crosstalk:enrol`** (3.3.5): a one-shot loopback page (one-time token, Host/Origin-checked, exits after one enrolment / Cancel / 5 min idle) for Join · Set up · Change estate password · Re-enrol. Calls `cc-enrol.mjs`'s exported core. |
+| `cc-enrol.mjs` | **Enrol by password** (3.3.5): hidden prompt → scrypt-derived `CC_TOKEN`/`CC_ADMIN_KEY` → verified against a proving leader → `~/.claude/.crosstalk` written. `--set-password` on an enrolled box, `--token` for the raw way. The headless/SSH fallback; exports the core the page uses. |
 | `cc-proof.mjs` | Discovery authentication: whoami nonce/HMAC + signed fresh beacon announces. |
 | `cc-console.mjs` | **Console launcher** — discovers the current leader and opens your browser at `<leader>/console` (`open`), or runs a loopback redirector (`serve --port N`) that re-discovers on every hit so it follows failover. The bus token rides in the URL *hash*, so it's never sent to the server. |
 | `skills/crosstalk/SKILL.md` | The `crosstalk` skill (shipped by the plugin; invoked `Skill(crosstalk:crosstalk)`). |

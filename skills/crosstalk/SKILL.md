@@ -9,7 +9,9 @@ The real-time coordination channel between every Claude the operator runs across
 self-hosting Crosstalk bus — **no fixed server IP**; the leader is discovered (LAN beacon / tailnet peer-scan),
 highest election epoch wins. This machine is *enrolled* (it has the bus config `~/.claude/.crosstalk`, or the
 legacy `~/.claude/.cross-claude-bus`); the client scripts ship with this plugin (`${CLAUDE_PLUGIN_ROOT}` /
-`<live>` below). You receive via `cc-ws --once` run as a **background Bash task** (real-time
+`<live>` below). A machine that is NOT enrolled gets there with `/crosstalk:enrol` (a local browser page —
+never ask for, or accept, the estate password in chat). You receive via `cc-ws --once` run as a
+**background Bash task** (real-time
 WebSocket push, with `cc-poll` as the automatic fallback) and send via `cc-send.mjs` — NOT the MCP
 `wait_for_reply`/`listen_live` tools (a backgrounded MCP wait goes deaf at ~120s; the background task
 genuinely wakes the session the instant a message lands).
