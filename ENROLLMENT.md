@@ -106,19 +106,15 @@ Host- and Origin-checked, and exits after one enrolment, Cancel, or 5 minutes id
 
 A new estate's first machine — and **every machine that may host** (a failover must never land on
 a loopback-only leader) — must be reachable by the others. Its bus binds loopback unless the config
-sets `CC_BIND`, and reachability is always an explicit, worded choice:
-
-- **With a tailnet** (an address in `100.64.0.0/10`), Set up's **"Let my other machines join"** and
-  Join's **"Make its bus reachable…"** default ON and write `CC_BIND=<the tailnet address>`:
-  reachable by your tailnet's machines only. Terminal: hosting (`--auto-supervisor`) implies it.
-- **Without one**, the only way to be reachable is every interface, `CC_BIND=0.0.0.0` — which also
-  means public Wi-Fi the laptop later joins. `/api/*` still needs the estate token and discovery
-  only adopts a leader that proves it holds it, but `/health`, `/console`, `/openapi.json` and
-  `/cc/whoami` answer anyone who reaches the port. So it is OFF by default and only ever written
-  when ticked (terminal: `--lan`), and the success message says what it exposes.
-
-A re-enrol or password change never adds or changes a bind, and an existing `CC_BIND` (say, an
-address chosen by hand) is never replaced. A machine that never hosts gets none.
+sets `CC_BIND`, and the enrolment only ever writes one value, `CC_BIND=0.0.0.0` — **every network the
+machine joins**, including public Wi-Fi it later roams onto. `/api/*` still needs the estate token
+and discovery only adopts a leader that proves it holds it, but `/health`, `/console`,
+`/openapi.json` and `/cc/whoami` answer anyone who reaches the port. So it is **never a default**:
+Set up's **"Let my other machines join"** and Join's **"Make its bus reachable…"** start unticked,
+the terminal needs `--lan`, the success message says what it exposes, and a re-enrol or password
+change never adds or changes a bind. An existing `CC_BIND` is never replaced. Tick it on the
+machines that host and stay on networks you trust; a tailnet-only mode (bind the tailnet AND
+loopback) needs server support and is tracked separately.
 
 **Headless / SSH: the terminal fallback.** The same core, with a hidden prompt:
 
@@ -131,8 +127,8 @@ node "<plugin or REPO>/src/cc-enrol.mjs" --auto-supervisor
 
 The keys are derived from the password (never stored) and verified against a leader that proves
 it holds them, so a typo cannot half-enrol the box. First box of a brand-new estate (no leader
-yet): `cc-enrol --no-verify --auto-supervisor` (binds the tailnet address when there is one; add
-`--lan` for `CC_BIND=0.0.0.0` on a network without a tailnet). Switching an old raw-token estate to a password: on one enrolled box
+yet): `cc-enrol --no-verify --auto-supervisor --lan` (`--lan` writes `CC_BIND=0.0.0.0` so the other
+machines can reach it). Switching an old raw-token estate to a password: on one enrolled box
 `cc-enrol --set-password` (page: **Change estate password**), restart its supervisor, then
 `cc-enrol --re-enrol` (page: **Re-enrol**) on every other box in the same sitting (until then the estate is split: old-token boxes will not trust the new leader). The
 password must be ≥16 chars — a passphrase of four or more random words. Windows: run the prompt from
@@ -314,10 +310,9 @@ Put the etiquette in the repo's `AGENTS.md` — Codex has no Skill tool to load 
   everything there. Now any config with a `CC_TOKEN` is gated: a session that has not armed
   `cc-ws` is blocked from editing code — files inside a git work tree, or inside `CC_ESTATE` when
   the config sets it (`~/.claude` and the temp dir are never gated).
-- **A machine that may host must be reachable** (§3): on a tailnet, new enrolments with the
-  auto-supervisor bind the tailnet address; without one, `0.0.0.0` is an explicit choice. A
-  re-enrol never changes the bind, so check by hand that every box with `CC_AUTO_SUPERVISOR=1`
-  also has a `CC_BIND`.
+- **A machine that may host must be reachable** (§3): `CC_BIND=0.0.0.0` is an explicit choice at
+  enrolment (never a default), and a re-enrol never changes the bind — so check by hand that every
+  box with `CC_AUTO_SUPERVISOR=1` also has a `CC_BIND`.
 - **Discovery is authenticated.** During the rollout sitting, set `CC_DISCOVERY_PROOF=legacy` while
   a pre-3.3.5 leader still serves, and remove it the same sitting (see Troubleshooting).
 

@@ -39,7 +39,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configPath } from './cc-paths.mjs';
 import { resolveFull } from './cc-discover.mjs';
 import { canonicalShort } from './cc-render.mjs';
-import { deriveKeys, enrolPrecondition, verifyToken, writeEnrolment, SPLIT_WARNING, tailnetAddress } from './cc-enrol.mjs';
+import { deriveKeys, enrolPrecondition, verifyToken, writeEnrolment, SPLIT_WARNING } from './cc-enrol.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const IDLE_MS = Number(process.env.CC_ENROL_WEB_IDLE_MS) || 5 * 60 * 1000;
@@ -60,8 +60,7 @@ function tokenMatches(expected, given) {
 
 async function machineState(path) {
   const host = canonicalShort(process.env.CC_HOST || hostname());   // the name the bus shows (cc-bus does the same)
-  const tailnet = tailnetAddress();
-  if (existsSync(path)) return { mode: 'enrolled', host, config: path, tailnet };
+  if (existsSync(path)) return { mode: 'enrolled', host, config: path };
   // This probe is UNAUTHENTICATED: an unenrolled machine has no key to challenge a responder with
   // (token '' → cc-discover skips the proof check). So a forged responder can at worst change
   // which form the page opens on (Join instead of Set up). That is all it may decide — the user
@@ -70,15 +69,12 @@ async function machineState(path) {
   let found = null;
   try { found = await resolveFull({ token: '', lanTimeoutMs: 800, timeoutMs: 2000 }); } catch {}
   const estate = found ? { host: String(found.host || '') } : null;
-  return { mode: defaultMode({ enrolled: false, estate }), host, config: path, estate, tailnet };
+  return { mode: defaultMode({ enrolled: false, estate }), host, config: path, estate };
 }
 
 // What the written bind exposes, in words — shown after Set up / Join so the choice is never silent.
 function bindNote() {
-  const t = tailnetAddress();
-  return t
-    ? `Its bus listens on your tailnet address (${t}) — reachable by your tailnet's machines only.`
-    : 'Its bus listens on EVERY network this machine joins (CC_BIND=0.0.0.0), including public Wi-Fi. Messages need the estate key, but a few status routes (/health, /cc/whoami) answer anyone — so keep the estate password a long passphrase.';
+  return 'Its bus listens on EVERY network this machine joins (CC_BIND=0.0.0.0), including public Wi-Fi. Messages need the estate key, but a few status routes (/health, /cc/whoami) answer anyone — so keep the estate password a long passphrase.';
 }
 
 // One enrolment request → { status, body }. Never puts the password or a key in the body.
@@ -102,14 +98,10 @@ async function enrol(path, host, req) {
     leader = v.leader;
   }
   const autoSupervisor = (action === 'join' || action === 'setup') && req.autoSupervisor !== false;
-  // CC_BIND (#60): Set up / Join each carry an explicit "reachable from my other machines" choice
-  // (`lan`); the page defaults it ON only with a tailnet (bind = the tailnet address), OFF otherwise
-  // (bind would be 0.0.0.0 — every network the machine joins). An older client that omits it gets
-  // the same default. Join also needs hosting: a machine that never hosts needs no bind.
-  // Re-enrol / set-password never change the bind. An existing CC_BIND is never overridden.
-  const lanDefault = !!tailnetAddress();
-  const wantLan = typeof req.lan === 'boolean' ? req.lan : lanDefault;
-  const lan = action === 'setup' ? wantLan : action === 'join' ? autoSupervisor && wantLan : undefined;
+  // CC_BIND=0.0.0.0 (#60): Set up / Join each carry an explicit "reachable from my other machines"
+  // box (`lan`, default OFF — it is every-network exposure); absent = off. Join also needs hosting: a
+  // machine that never hosts needs no bind. Re-enrol / set-password never change the bind.
+  const lan = (action === 'setup' || (action === 'join' && autoSupervisor)) && req.lan === true;
   writeEnrolment(path, { token, admin, autoSupervisor, lan, rewrite: action === 'set-password' || action === 're-enrol' });
 
   const bus = join(HERE, 'cc-bus.mjs').replace(/\\/g, '/');
@@ -119,7 +111,7 @@ async function enrol(path, host, req) {
       ? 'Start a new Claude session: it starts the bus here.'
       : `Nothing hosts the bus yet — run node "${bus}" start, or enable the auto-supervisor.`} ${lan
       ? `Other machines join with the same password via /crosstalk:enrol. ${bindNote()}`
-      : `Only this machine can reach its bus (it listens on loopback). To let other machines join later, add CC_BIND=<this machine's tailnet address, or 0.0.0.0> to ${path} and restart the bus supervisor.`}`,
+      : `Only this machine can reach its bus (it listens on loopback). To let other machines join later, add CC_BIND=0.0.0.0 to ${path} and restart the bus supervisor.`}`,
     'set-password': `Estate password set ✓ — this machine now uses the keys derived from it. Next, on every other machine run /crosstalk:enrol → Re-enrol with this password: ${SPLIT_WARNING}`,
     're-enrol': `Re-enrolled ✓ with the new estate password. Restart the bus supervisor on this machine so it uses the new keys.`,
   }[action];

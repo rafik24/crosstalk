@@ -12,10 +12,10 @@
 //   node cc-enrol.mjs --token <tok>   the pre-3.3.5 way: write a raw token, no derivation (≥32 chars)
 //   options: --auto-supervisor  (also set CC_AUTO_SUPERVISOR=1)   --no-verify  (write without
 //            finding a leader — for the FIRST box of a brand-new estate)   --config <path>
-//            --lan / --no-lan  (make this box's bus reachable when it hosts, or not: the tailnet
-//            address when there is one, else CC_BIND=0.0.0.0). Default: the auto-supervisor implies
-//            a TAILNET bind only (#60) — every-interface exposure is only ever --lan. A re-enrol /
-//            --set-password never adds a bind; an existing CC_BIND is kept
+//            --lan  (CC_BIND=0.0.0.0: make this box's bus reachable from the other machines —
+//            needed on every box that may host, #60). Never a default: it is every-interface
+//            exposure, so it is always an explicit choice. A re-enrol / --set-password never adds
+//            a bind; an existing CC_BIND is kept. (--no-lan is accepted and is the default.)
 //
 // The usual way in is the browser page (/crosstalk:enrol → cc-enrol-web.mjs), which calls the
 // exported core below; this CLI is the headless/SSH fallback (same core, same rules).
@@ -35,7 +35,6 @@
 // ---------------------------------------------------------------------------
 import { scryptSync } from 'node:crypto';
 import { existsSync, writeFileSync, readFileSync, mkdirSync, chmodSync, renameSync, rmSync } from 'node:fs';
-import { networkInterfaces } from 'node:os';
 import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { configPath } from './cc-paths.mjs';
@@ -79,22 +78,6 @@ function writeConfig(path, lines) {
   } catch (e) { try { rmSync(tmp, { force: true }); } catch {} throw e; }
 }
 
-// This machine's tailnet address (Tailscale/Headscale CGNAT range 100.64.0.0/10), or null. A bus
-// that must be reachable binds THERE when it can: reachable by the estate's machines over the
-// tailnet, invisible on whatever café Wi-Fi the laptop is on (crosstalk-reviewer 2026-10-08).
-export function tailnetAddress(ifaces = networkInterfaces()) {
-  // Tests pin the answer ('none' or an address), as they do the password (CC_ENROL_PASSWORD_FOR_TESTS).
-  const forced = process.env.CC_ENROL_TAILNET_FOR_TESTS;
-  if (forced !== undefined) return forced === 'none' ? null : forced;
-  for (const list of Object.values(ifaces || {})) for (const a of list || []) {
-    if (a.internal || (a.family !== 'IPv4' && a.family !== 4)) continue;
-    const [o1, o2] = String(a.address).split('.').map(Number);
-    if (o1 === 100 && o2 >= 64 && o2 <= 127) return a.address;
-  }
-  return null;
-}
-// The CC_BIND a reachable bus gets: the tailnet address when there is one, else every interface.
-export function reachableBind() { return tailnetAddress() || '0.0.0.0'; }
 
 // --- the enrolment core, shared by this CLI and the browser page (cc-enrol-web.mjs) -------------
 // Exported so the page reuses the SAME derivation, verification and file write: the crypto and
@@ -126,27 +109,26 @@ export async function verifyToken(token) {
 // Write the enrolment. rewrite=true (set-password / re-enrol) keeps every line of the existing
 // file except the two keys; a fresh enrolment writes just the keys (+ the supervisor opt-in).
 const ENROLMENT_HEADER = '# Crosstalk bus — per-machine enrolment (written by cc-enrol; keys derived from the estate password, never the password itself)';
-// CC_BIND makes the bus this box hosts listen beyond loopback (#60) — on the tailnet address when
-// there is one, else on every interface (0.0.0.0). /api/* needs the estate token and a client only
-// adopts a leader that proves it holds it (cc-proof), but /health, /console, /openapi.json and
-// /cc/whoami answer anyone who can reach the port — so reachability is chosen, never slipped in.
-// lan: true / false decides explicitly (true without a tailnet = 0.0.0.0). Left undefined on a FRESH
-// enrolment it follows hosting — but only onto a TAILNET address: a box that may become leader must
-// be reachable (#60), yet every-interface exposure is only ever an explicit choice (--lan / the box).
-// A REWRITE (set-password / re-enrol) never adds a bind on its own; an existing CC_BIND is never
-// overridden (e.g. an address chosen by hand).
+// CC_BIND=0.0.0.0 makes the bus this box hosts listen beyond loopback (#60). /api/* needs the estate
+// token and a client only adopts a leader that proves it holds it (cc-proof), but /health, /console,
+// /openapi.json and /cc/whoami answer anyone who can reach the port — on every network the machine
+// joins. So it is written ONLY when chosen (lan === true), never as a default and never by a rewrite.
+// Not a specific address: the bus binds exactly one address, so a tailnet IP would drop the
+// 127.0.0.1 listener the supervisor relies on, and a bind that fails at start (tailnet down) makes
+// the supervisor re-elect every second, climbing the epoch (crosstalk-reviewer 2026-10-08) — a
+// tailnet-only mode needs server support first (issue 67). An existing CC_BIND is never overridden.
 export function writeEnrolment(path, { token, admin, autoSupervisor = false, lan, rewrite = false }) {
   const keep = [];
   if (rewrite) {   // our own header is re-emitted below — keeping it too stacked one copy per rewrite
     for (const l of readFileSync(path, 'utf8').split(/\r?\n/)) if (l.trim() && l !== ENROLMENT_HEADER && !/^\s*(export\s+)?CC_(TOKEN|ADMIN_KEY)\s*=/.test(l)) keep.push(l);
   }
-  const bind = lan ?? (!rewrite && autoSupervisor && !!tailnetAddress());
+  const bind = lan === true;
   writeConfig(path, [
     ENROLMENT_HEADER,
     `CC_TOKEN=${token}`,
     ...(admin ? [`CC_ADMIN_KEY=${admin}`] : []),
     ...(autoSupervisor && !keep.some((l) => /CC_AUTO_SUPERVISOR/.test(l)) ? ['CC_AUTO_SUPERVISOR=1'] : []),
-    ...(bind && !keep.some((l) => /^\s*(export\s+)?CC_BIND\s*=/.test(l)) ? [`CC_BIND=${reachableBind()}`] : []),
+    ...(bind && !keep.some((l) => /^\s*(export\s+)?CC_BIND\s*=/.test(l)) ? ['CC_BIND=0.0.0.0'] : []),
     ...keep,
   ]);
 }

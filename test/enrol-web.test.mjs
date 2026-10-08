@@ -19,9 +19,9 @@
 //   W11 the launcher returns at once and leaves the server running (detached), which then exits
 //   W12 no response body ever carried a password or a derived key
 //   W13 the join hook points an unenrolled machine at /crosstalk:enrol
-//   W14 Set up's "let other machines join": ticked → CC_BIND (tailnet address, else 0.0.0.0); unticked → none;
-//       not sent → ON only with a tailnet (#60 + reviewer 2026-10-08: every-interface exposure is opt-in)
-//   W15 CLI: hosting implies a TAILNET bind; --lan is the explicit 0.0.0.0; a re-enrol never adds a bind
+//   W14 Set up's "let other machines join": ticked → CC_BIND=0.0.0.0; unticked or not sent → none
+//       (#60 + reviewer 2026-10-08: every-interface exposure is only ever an explicit choice)
+//   W15 CLI: --lan is the only way to CC_BIND=0.0.0.0 (hosting no longer implies it); a re-enrol never adds one
 //   W16 page Join/Re-enrol: host ticked → CC_BIND; unticked → none; an existing CC_BIND is kept (#60)
 // ---------------------------------------------------------------------------
 import http from 'node:http';
@@ -38,8 +38,7 @@ const SERVER = join(__dirname, '..', 'server', 'server.mjs');
 const SCRATCH = mkdtempSync(join(tmpdir(), 'ccenrolweb-'));
 const LEADER = Number(process.env.CC_TEST_PORT || 8851), DEAD = LEADER + 2, LOOP = LEADER + 4;
 for (const k of Object.keys(process.env)) if (k.startsWith('CC_') || k === 'MCP_API_KEY') delete process.env[k];
-Object.assign(process.env, { CC_CACHE_DIR: join(SCRATCH, 'cache'), CC_DATA_DIR: join(SCRATCH, 'data'), CC_PORT: String(LOOP), CC_BEACON_PORT: String(LEADER + 5), CC_DISCOVERY: 'peers', CC_BIND: '127.0.0.1', CC_HOST: 'testbox', CC_ENROL_TAILNET_FOR_TESTS: 'none' });
-const TAILNET = '100.100.1.2';   // what a box WITH a tailnet reports (via CC_ENROL_TAILNET_FOR_TESTS)
+Object.assign(process.env, { CC_CACHE_DIR: join(SCRATCH, 'cache'), CC_DATA_DIR: join(SCRATCH, 'data'), CC_PORT: String(LOOP), CC_BEACON_PORT: String(LEADER + 5), CC_DISCOVERY: 'peers', CC_BIND: '127.0.0.1', CC_HOST: 'testbox' });
 
 const { deriveKeys } = await import('../src/cc-enrol.mjs');
 const PW = 'the estate password for this test';
@@ -191,7 +190,7 @@ try {
     ok(r.status === 200 && r.json?.ok && /Enrolled ✓ as testbox/.test(r.json.message) && r.json.leader?.host === 'leaderhost', `200 Enrolled ✓, verified by leaderhost (${r.status} ${r.json?.message?.slice(0, 40)})`);
     const written = existsSync(s.config) ? readFileSync(s.config, 'utf8') : '';
     ok(written.includes(`CC_TOKEN=${KEYS.token}\n`) && written.includes(`CC_ADMIN_KEY=${KEYS.admin}\n`) && written.includes('CC_AUTO_SUPERVISOR=1'), 'config holds exactly deriveKeys()’ token + admin key, + the auto-supervisor opt-in');
-    ok(/^CC_BIND=0\.0\.0\.0$/m.test(written), 'host + reachable ticked, no tailnet → CC_BIND=0.0.0.0 (#60)');
+    ok(/^CC_BIND=0\.0\.0\.0$/m.test(written), 'host + reachable ticked → CC_BIND=0.0.0.0 (#60)');
     ok(/EVERY network/.test(r.json?.message || ''), 'the success message says the bus now listens on every network');
     ok(!written.includes(PW), 'the password itself is not in the file');
     if (process.platform !== 'win32') ok((statSync(s.config).mode & 0o777) === 0o600, 'config is mode 600');
@@ -262,7 +261,7 @@ try {
     ok(fallback && existsSync(fallback), `the Headless/SSH fallback path exists (${fallback})`);
   }
 
-  console.log('W14 Set up: reachability is explicit — tailnet address when there is one, 0.0.0.0 only when ticked (#60)');
+  console.log('W14 Set up: CC_BIND=0.0.0.0 only when ticked (#60)');
   {
     const setup = async (name, extra, env = {}) => {
       const s = await start(name, env);
@@ -271,20 +270,16 @@ try {
       return { r, text: existsSync(s.config) ? readFileSync(s.config, 'utf8') : '' };
     };
     const on = await setup('w14-on', { lan: true });
-    ok(on.r.status === 200 && /^CC_BIND=0\.0\.0\.0$/m.test(on.text) && /EVERY network/.test(on.r.json?.message), 'ticked, no tailnet → CC_BIND=0.0.0.0, message says EVERY network');
+    ok(on.r.status === 200 && /^CC_BIND=0\.0\.0\.0$/m.test(on.text) && /EVERY network/.test(on.r.json?.message), 'ticked → CC_BIND=0.0.0.0, message says EVERY network');
     const off = await setup('w14-off', { lan: false });
     ok(off.r.status === 200 && off.text.includes('CC_TOKEN=') && !/CC_BIND/.test(off.text) && /Only this machine/.test(off.r.json?.message), 'unticked → no CC_BIND (this machine only), message says so');
     const dflt = await setup('w14-default', {});
-    ok(dflt.text.includes('CC_TOKEN=') && !/CC_BIND/.test(dflt.text), 'not sent, no tailnet → defaults OFF (no every-interface exposure by default)');
-    const tn = await setup('w14-tailnet', {}, { CC_ENROL_TAILNET_FOR_TESTS: TAILNET });
-    ok(new RegExp(`^CC_BIND=${TAILNET.replace(/\./g, '\\.')}$`, 'm').test(tn.text) && /tailnet address/.test(tn.r.json?.message), `not sent, WITH a tailnet → CC_BIND=${TAILNET} (tailnet only), message says so`);
-    const st = await start('w14-state', { CC_ENROL_TAILNET_FOR_TESTS: TAILNET });
-    const state = await req(st.url + 'state');
-    ok(state.json?.tailnet === TAILNET, `GET state reports the tailnet address the page defaults on (${state.json?.tailnet})`);
-    await stop(st);
+    ok(dflt.text.includes('CC_TOKEN=') && !/CC_BIND/.test(dflt.text), 'not sent → defaults OFF (no every-interface exposure by default)');
+    const page = (await (async () => { const s = await start('w14-page'); const r = await req(s.url); await stop(s); return r.body || ''; })());
+    ok(/name="lan"/.test(page) && !/name="lan"[^>]*checked/.test(page), 'the page ships every reachability box UNticked');
   }
 
-  console.log('W15 CLI: hosting implies a TAILNET bind; --lan is the explicit 0.0.0.0; re-enrol never adds one (#60)');
+  console.log('W15 CLI: --lan is the only way to CC_BIND=0.0.0.0; re-enrol never adds one (#60)');
   {
     const ENROL = join(__dirname, '..', 'src', 'cc-enrol.mjs');
     const BIND = /^CC_BIND=0\.0\.0\.0$/m;
@@ -297,8 +292,7 @@ try {
     // --no-verify path (first box of a new estate)
     const nv = cli('w15-nv-lan', ['--no-verify', '--lan']);
     ok(nv.status === 0 && BIND.test(nv.text) && nv.text.includes(`CC_TOKEN=${KEYS.token}`), '--no-verify --lan → CC_BIND=0.0.0.0 alongside the derived keys');
-    ok(!/CC_BIND/.test(cli('w15-nv-auto', ['--no-verify', '--auto-supervisor']).text), '--no-verify --auto-supervisor, no tailnet → no CC_BIND (0.0.0.0 needs --lan)');
-    ok(/^CC_BIND=100\.100\.1\.2$/m.test(cli('w15-nv-auto-tn', ['--no-verify', '--auto-supervisor'], { env: { CC_ENROL_TAILNET_FOR_TESTS: TAILNET } }).text), '--no-verify --auto-supervisor WITH a tailnet → CC_BIND=<tailnet address> (hosting implies reachable)');
+    ok(!/CC_BIND/.test(cli('w15-nv-auto', ['--no-verify', '--auto-supervisor']).text), '--no-verify --auto-supervisor → no CC_BIND (0.0.0.0 needs --lan)');
     const nvNo = cli('w15-nv-nolan', ['--no-verify', '--auto-supervisor', '--no-lan']);
     ok(nvNo.status === 0 && /CC_AUTO_SUPERVISOR=1/.test(nvNo.text) && !/CC_BIND/.test(nvNo.text), '--auto-supervisor --no-lan → no CC_BIND');
     ok(!/CC_BIND/.test(cli('w15-nv-plain', ['--no-verify']).text), 'neither flag (never hosts) → no CC_BIND');
@@ -308,13 +302,13 @@ try {
     const jp = cli('w15-join-plain', [], { peers: `127.0.0.1:${LEADER}` });
     ok(jp.status === 0 && !/CC_BIND/.test(jp.text), `join without --auto-supervisor → no CC_BIND (${jp.status})`);
     // --re-enrol only swaps the keys: it never ADDS a bind (silent exposure), and an existing bind is kept
-    const re = cli('w15-re-auto', ['--re-enrol'], { pre: 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\n', peers: `127.0.0.1:${LEADER}`, env: { CC_ENROL_TAILNET_FOR_TESTS: TAILNET } });
+    const re = cli('w15-re-auto', ['--re-enrol'], { pre: 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\n', peers: `127.0.0.1:${LEADER}` });
     ok(re.status === 0 && re.text.includes(`CC_TOKEN=${KEYS.token}`) && !/CC_BIND/.test(re.text), '--re-enrol on a hosting box with no CC_BIND → none added (a rewrite never changes reachability)');
     const rk = cli('w15-re-keep', ['--re-enrol'], { pre: 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\nCC_BIND=100.64.0.9\n', peers: `127.0.0.1:${LEADER}` });
     ok(rk.status === 0 && /^CC_BIND=100\.64\.0\.9$/m.test(rk.text) && (rk.text.match(/CC_BIND/g) || []).length === 1, '--re-enrol keeps an existing CC_BIND=100.64.0.9 (never overridden)');
   }
 
-  console.log('W16 page Join: reachable only when chosen (or with a tailnet); re-enrol never adds a bind (#60)');
+  console.log('W16 page Join: reachable only when chosen; re-enrol never adds a bind (#60)');
   {
     const BIND = /^CC_BIND=0\.0\.0\.0$/m;
     const join1 = async (name, body, pre) => {
@@ -331,7 +325,9 @@ try {
     const add = await join1('w16-add', { action: 're-enrol' }, 'CC_TOKEN=old\nCC_AUTO_SUPERVISOR=1\n');
     ok(add.status === 200 && add.text.includes(`CC_TOKEN=${KEYS.token}`) && !/CC_BIND/.test(add.text), 'Re-enrol on a hosting box with no CC_BIND → none added (no silent exposure)');
     const dflt = await join1('w16-host-default', { action: 'join', autoSupervisor: true });
-    ok(dflt.status === 200 && /CC_AUTO_SUPERVISOR=1/.test(dflt.text) && !/CC_BIND/.test(dflt.text), 'Join, host ticked, reachability not sent, no tailnet → no CC_BIND');
+    ok(dflt.status === 200 && /CC_AUTO_SUPERVISOR=1/.test(dflt.text) && !/CC_BIND/.test(dflt.text), 'Join, host ticked, reachability not sent → no CC_BIND');
+    const nohost = await join1('w16-lan-nohost', { action: 'join', autoSupervisor: false, lan: true });
+    ok(nohost.status === 200 && !/CC_BIND/.test(nohost.text), 'Join, reachable ticked but host unticked → no CC_BIND (a box that never hosts serves nothing)');
   }
 
   console.log('W12 no response ever carried a secret');

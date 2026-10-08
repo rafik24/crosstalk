@@ -91,7 +91,7 @@
       <label class="check"><input type="checkbox" name="autoSupervisor" checked aria-describedby="join-host-hint"> Let this machine host the bus when needed (auto-supervisor — recommended)</label>
       <p id="join-host-hint" class="muted">Untick and this machine only ever connects.</p>
       <label class="check"><input type="checkbox" name="lan" aria-describedby="join-lan-hint"> Make its bus reachable from my other machines when it hosts</label>
-      <p id="join-lan-hint" class="muted" data-lan-hint></p>
+      <p id="join-lan-hint" class="muted">Needed for a failover to land here. Its bus then listens on EVERY network this machine joins, including public Wi-Fi: messages still need the estate key, but a few status routes answer anyone. Tick it on machines that stay on networks you trust.</p>
       <div class="row"><button class="primary" type="submit">Join</button></div>
       <p class="muted">Nothing is saved unless a machine in your estate proves it knows this password.</p>
     </form>
@@ -108,7 +108,7 @@
       <label class="check"><input type="checkbox" name="show"> Show passwords</label>
       <label class="check"><input type="checkbox" name="autoSupervisor" checked> Let this machine host the bus (auto-supervisor — recommended)</label>
       <label class="check"><input type="checkbox" name="lan" aria-describedby="lan-hint"> Let my other machines join</label>
-      <p id="lan-hint" class="muted" data-lan-hint></p>
+      <p id="lan-hint" class="muted">Its bus then listens on EVERY network this machine joins, including public Wi-Fi: messages still need the estate key, but a few status routes answer anyone. Leave it unticked for a single-machine estate.</p>
       <div class="row"><button class="primary" type="submit">Set up estate</button></div>
     </form>
 
@@ -243,13 +243,6 @@
       return;
     }
     for (const el of $$('[data-host]')) el.textContent = state.host;
-    // Reachability is an explicit choice, worded for what it actually exposes: with a tailnet the bus
-    // binds the tailnet address (on by default); without one it would bind EVERY network (off).
-    for (const box of $$('input[name=lan]')) box.checked = !!state.tailnet;
-    const lanText = state.tailnet
-      ? `Its bus then listens on your tailnet address (${state.tailnet}) — reachable by your tailnet's machines only. Untick for a single-machine estate.`
-      : 'No tailnet found, so its bus would listen on EVERY network this machine joins, including public Wi-Fi. Messages still need the estate key, but a few status routes answer anyone. Tick only if your machines share a trusted network.';
-    for (const el of $$('[data-lan-hint]')) el.textContent = lanText;
     $('#loading').removeAttribute('aria-busy');
     show(state.mode);
   })();
