@@ -59,7 +59,7 @@ ok(r.code === 0, '4: Codex apply_patch outside the estate → allowed');
 // inside the estate → BLOCKED; a relative path from a cwd OUTSIDE the estate → allowed.
 r = gate({ session_id: SID, cwd: 'D:\\estate\\app', tool_name: 'apply_patch', tool_input: { command: patch('core/x.py') } });
 ok(r.code === 2 && /NOT listening/.test(r.err), '3b: Codex apply_patch with a RELATIVE estate path (cwd inside estate), stale beacon → BLOCKED');
-ok(/cc-codex-bridge\.mjs ensure/.test(r.err) && !/Monitor\(/.test(r.err), '3b: block hint is Codex-aware (bridge ensure, not Monitor)');
+ok(/node "[^"\\]*cc-codex-bridge\.mjs" ensure/.test(r.err) && !/Monitor\(/.test(r.err), '3b: block hint is Codex-aware (bridge ensure, not Monitor) — quoted, forward slashes');
 r = gate({ session_id: SID, cwd: 'C:\\scratch', tool_name: 'apply_patch', tool_input: { command: patch('notes/todo.md') } });
 ok(r.code === 0, '3c: relative path from a cwd outside the estate → allowed');
 r = gate({ session_id: SID, cwd: 'D:\\estate\\app', tool_name: 'apply_patch', tool_input: { command: patch('../../scratch/a.md') + patch('api/app.py') } });
@@ -113,7 +113,7 @@ ok(r.code === 0, '5: Codex apply_patch on estate path with a fresh beacon → al
   const CSID = 'cccccccc-1111-4222-8333-444444444444';
   writeFileSync(join(listenDir, CSID + '.id'), 'testbox/claude-lane-cccccccc');
   const ch = spawnSync(process.execPath, [GATE], { input: JSON.stringify({ session_id: CSID, tool_name: 'Write', tool_input: { file_path: inRepo } }), encoding: 'utf8', env: { ...process.env, HOME, USERPROFILE: HOME, CC_BUS_CONFIG: bare, CC_LISTEN_BYPASS: '', CC_TOKEN: '' } });
-  ok(ch.status === 2 && /node [^ ]*cc-ws\.mjs [^ ]+ --once/.test(ch.stderr) && !/<cc-ws\.mjs>/.test(ch.stderr), '9b: a Claude session hint names the real cc-ws.mjs path with --once (no <placeholder>)');
+  ok(ch.status === 2 && /node "[^"\\]*cc-ws\.mjs" [^ ]+ --once/.test(ch.stderr) && !/<cc-ws\.mjs>/.test(ch.stderr), '9b: a Claude session hint names the real cc-ws.mjs path — quoted, forward slashes — with --once (no <placeholder>)');
   ok(run(join(HOME, '.claude', 'projects', 'x', 'memory', 'note.md')).status === 0, '9c: no CC_ESTATE, ~/.claude (session memory) → allowed');
   ok(run(join(tmpdir(), 'scratch.txt')).status === 0, '9d: no CC_ESTATE, the temp dir → allowed');
   ok(run(process.platform === 'win32' ? 'Z:\\no-such-dir\\notes.md' : '/no-such-dir/notes.md').status === 0, '9e: no CC_ESTATE, outside any git work tree → allowed');

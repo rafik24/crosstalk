@@ -72,13 +72,16 @@ try {
 
 // 3. tell the session how to (re)arm under the new id
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ws = join(HERE, 'cc-ws.mjs');
-const send = join(HERE, 'cc-send.mjs');
+// Forward slashes + quoted: the printed line is run by the agent's Bash (Git Bash on Windows),
+// where an unquoted C:\Users\… loses every backslash ("Cannot find module 'C:UsersRaf…'"). Node
+// accepts forward slashes on every OS. (3.3.6 — the 3.3.5 line failed on every Windows session.)
+const ws = join(HERE, 'cc-ws.mjs').replace(/\\/g, '/');
+const send = join(HERE, 'cc-send.mjs').replace(/\\/g, '/');
 console.log(`named on the bus as: ${id}`);
 console.log(`ARM (or RE-ARM) live-receive with THIS id — TaskStop any receiver armed under an older id first:`);
 // cc-ws is the real-time PUSH receiver (WebSocket + cursor backfill, issue #3). It auto-falls
 // back to the old 2s poll if the leader is too old to speak WS, so it is always safe to arm.
-console.log(`  Bash({ command: 'node ${ws} ${id} --once', run_in_background: true, description: 'crosstalk bus (${id})' })`);
+console.log(`  Bash({ command: 'node "${ws}" ${id} --once', run_in_background: true, description: 'crosstalk bus (${id})' })`);
 console.log(`  (it EXITS when a message for you arrives: re-arm FIRST with this same line, then Read the task's`);
 console.log(`   output file. Exit 3 = superseded → do nothing. Routine wakes are SILENT — no "re-armed", no ※ recap.)`);
-console.log(`From now, send as:  node ${send} ${id} <channel|all> 'message'`);
+console.log(`From now, send as:  node "${send}" ${id} <channel|all> 'message'`);

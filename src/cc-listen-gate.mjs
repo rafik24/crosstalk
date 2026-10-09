@@ -131,10 +131,10 @@ try {
     `⛔ CHAT BUS — this session (${id}) is NOT listening; blocked before editing ${file || 'an estate file'}.`,
     `On an enrolled machine every session must be on the live bus before it edits code. Arm receive, then retry:`,
     isCodex
-      ? `  node ${join(here, 'cc-codex-bridge.mjs')} ensure ${id} --session ${sid || '<session_id>'}   (the bridge heartbeats the beacon; check ~/.claude/.cc-listen/<sid>.bridge.log)`
+      ? `  node "${join(here, 'cc-codex-bridge.mjs').replace(/\\/g, '/')}" ensure ${id} --session ${sid || '<session_id>'}   (the bridge heartbeats the beacon; check ~/.claude/.cc-listen/<sid>.bridge.log)`
       : (/cc-ws\.mjs>?$/.test(recvHint)   // incl. the unconfigured '<cc-ws.mjs>' placeholder
-        ? `  Bash({ command: 'node ${recvHint} ${id} --once', run_in_background: true, description: 'crosstalk bus (${id})' })`
-        : `  Monitor({ command: 'node ${recvHint} ${id}', description: 'crosstalk bus (${id})', persistent: true })`),
+        ? `  Bash({ command: 'node "${recvHint}" ${id} --once', run_in_background: true, description: 'crosstalk bus (${id})' })`
+        : `  Monitor({ command: 'node "${recvHint}" ${id}', description: 'crosstalk bus (${id})', persistent: true })`),
     `(The SessionStart join hook prints this exact line. One-off bypass: set CC_LISTEN_BYPASS=1.)`,
   ].join('\n'));
 } catch {

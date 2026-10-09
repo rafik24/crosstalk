@@ -111,9 +111,9 @@ $JOIN_LINE
    🔁 RECEIVE: $BRIDGE_LINE
       Every message addressed to you (DM channel dm-${ID##*/}, an @${ID##*/} mention, or @all) is pushed
       INTO this session as a new turn, prefixed CHAT #<channel> <sender> [<type>]. »HANDOFF — ACK REQUIRED« means ack it.
-   Send:  node $CLIENT send $ID <channel|all> 'message' [--type status|request|response|handoff|done]
-   ACK:   node $CLIENT ack  $ID <channel> 'taking X into my lane'
-   Peers: node $CLIENT peers      Fallback receive (no bridge): node $CLIENT wait $ID --timeout 90
+   Send:  node "$CLIENT" send $ID <channel|all> 'message' [--type status|request|response|handoff|done]
+   ACK:   node "$CLIENT" ack  $ID <channel> 'taking X into my lane'
+   Peers: node "$CLIENT" peers      Fallback receive (no bridge): node "$CLIENT" wait $ID --timeout 90
    Etiquette (reply only if addressed; DM or @mention to reach a session; \`done\` when work lands): see AGENTS.md / the crosstalk skill.
 EOF
 )"

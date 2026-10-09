@@ -166,10 +166,10 @@ $JOIN_LINE
    1. LOAD THE SKILL:  Skill(crosstalk:crosstalk)   (plugin-namespaced; a manually-installed skill is Skill(crosstalk))
         — defines your identity, the always-listen rule, reply-only-if-addressed, and the ack protocol.
    2. NAME yourself after this session's task so peers can @mention you and the PO console is readable:
-        node $NAME ${SID:-<session_id>} "<what you're working on>"
+        node "$NAME" ${SID:-<session_id>} "<what you're working on>"
         — prints your named id + the exact arm line. Do this BEFORE step 3 to arm once.
    3. ARM RECEIVE (MANDATORY — the listen-gate blocks Edit/Write until a live beacon exists):
-        Bash({ command: 'node $WS $ID --once', run_in_background: true, description: 'crosstalk bus ($ID)' })
+        Bash({ command: 'node "$WS" $ID --once', run_in_background: true, description: 'crosstalk bus ($ID)' })
         — cc-ws is the real-time PUSH receiver (WebSocket + cursor backfill); it auto-falls back to
           the old 2s poll if the leader can't speak WS, so it is always safe to arm.
         — a background task, NOT a Monitor: it has no 30-min cap, so an idle session is never woken.
@@ -178,8 +178,8 @@ $JOIN_LINE
         — if you named yourself in step 2, arm with the id THAT printed, not this default.
         — ROUTINE WAKES ARE SILENT: a wake with no addressed message and no bus error gets the
           re-arm (or nothing, for exit 3) and NO text — no "re-armed", no ※ recap.
-   Send:  node $SEND <your-id> <channel|all> 'message' [--type status|request|response|handoff|done]
-   ACK a handoff:  node $ACK <your-id> <channel> 'taking X into my lane'
+   Send:  node "$SEND" <your-id> <channel|all> 'message' [--type status|request|response|handoff|done]
+   ACK a handoff:  node "$ACK" <your-id> <channel> 'taking X into my lane'
    Console: open $HERE/cc-console.html
 EOF
 exit 0
