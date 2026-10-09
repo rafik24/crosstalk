@@ -11,8 +11,8 @@
 // FAIL-OPEN: any error, unreachable state, or not-enrolled → exit 0. Never brick editing.
 // Bypass once (loud): CC_LISTEN_BYPASS=1.
 // ---------------------------------------------------------------------------
-import { readFileSync, statSync, realpathSync } from 'node:fs';
-import { homedir, hostname } from 'node:os';
+import { readFileSync, statSync, realpathSync, existsSync } from 'node:fs';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join, basename, resolve, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
@@ -20,6 +20,22 @@ import { configPath } from './cc-paths.mjs';
 
 const FRESH_MS = 45000;                       // cc-poll heartbeats every 20s → 45s window
 function done(code, msg) { if (msg) process.stderr.write(msg + '\n'); process.exit(code); }
+
+// Is this path an "estate file" when no CC_ESTATE scopes the gate? Inside a git work tree, and not
+// under ~/.claude or the temp dir. Exported for the test suite.
+export function isCodeFile(f) {
+  const n = (s) => String(s).replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+  const p = n(f);
+  for (const exempt of [join(homedir(), '.claude'), tmpdir()]) { const e = n(exempt); if (p === e || p.startsWith(e + '/')) return false; }
+  let dir = dirname(resolve(f));
+  for (let i = 0; i < 64; i++) {
+    if (existsSync(join(dir, '.git'))) return true;
+    const up = dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+  }
+  return false;
+}
 
 // Paths named by a Codex `apply_patch` envelope. Pure; exported for the test suite.
 export function patchPaths(text) {
@@ -48,7 +64,11 @@ try {
   const cfgPath = configPath();   // ~/.claude/.crosstalk, back-compat ~/.claude/.cross-claude-bus
   const cfg = {};
   try { for (const l of readFileSync(cfgPath, 'utf8').split(/\r?\n/)) { const m = l.match(/^\s*(?:export\s+)?(CC_[A-Z_]+)\s*=\s*(.*?)\s*$/); if (m) cfg[m[1]] = m[2].replace(/^["']|["']$/g, ''); } } catch {}
-  if (!cfg.CC_BASE) done(0);
+  // Enrolled = the config file holds an estate token (the same config cc-join.sh keys on). It used
+  // to be `CC_BASE`, but a discovery/password enrolment deliberately has NO CC_BASE (the leader is
+  // discovered, not pinned) — so on every such machine the gate silently allowed everything (#59).
+  // A pinned-CC_BASE config whose token comes only from the environment is enrolled too.
+  if (!(cfg.CC_TOKEN || cfg.CC_BASE || process.env.CC_TOKEN)) done(0);
   if (process.env.CC_LISTEN_BYPASS) done(0, '[cc-listen-gate] BYPASS active — allowed without a listen check (logged).');
 
   const tool = payload.tool_name || '';
@@ -71,6 +91,11 @@ try {
   // Gated if ANY touched path is inside the estate. No path known (unparseable patch) → gated
   // (conservative: the same as an Edit with an empty file_path was before).
   if (estate && files.length && !files.some((f) => norm(f).includes(estate))) done(0);
+  // No CC_ESTATE (every discovery/password enrolment — cc-enrol never writes one): "estate files" =
+  // files inside a git work tree. Without this the gate blocked EVERY write on the machine — the
+  // session's memory, scratch files, a headless `claude -p` — the moment #59 made it enforce
+  // (crosstalk-reviewer 2026-10-08). The Claude harness's own dirs and the temp dir are never gated.
+  if (!estate && files.length && !files.some(isCodeFile)) done(0);
 
   // identity: READ it from the session->id map that cc-join.sh / cc-name.mjs wrote, keyed by
   // session_id. This is authoritative — the gate no longer recomputes host/branch, so it always
@@ -97,7 +122,9 @@ try {
   if (fresh) done(0);
 
   // Prefer the push receiver (cc-ws) in the hint; fall back to cc-poll for older enrolments.
-  const recvHint = cfg.CC_WS || cfg.CC_POLL || '<cc-ws.mjs>';
+  // Unconfigured (every cc-enrol enrolment): the receiver that ships next to this gate — a real path,
+  // never a '<cc-ws.mjs>' placeholder the shell would read as a redirect.
+  const recvHint = (cfg.CC_WS || cfg.CC_POLL || join(dirname(fileURLToPath(import.meta.url)), 'cc-ws.mjs')).replace(/\\/g, '/');
   const isCodex = /\/codex-/.test(id);   // a Codex session has no Monitor — its receiver is the bridge
   const here = dirname(fileURLToPath(import.meta.url));
   done(2, [
@@ -105,7 +132,9 @@ try {
     `On an enrolled machine every session must be on the live bus before it edits code. Arm receive, then retry:`,
     isCodex
       ? `  node ${join(here, 'cc-codex-bridge.mjs')} ensure ${id} --session ${sid || '<session_id>'}   (the bridge heartbeats the beacon; check ~/.claude/.cc-listen/<sid>.bridge.log)`
-      : `  Monitor({ command: 'node ${recvHint} ${id}', description: 'crosstalk bus (${id})', persistent: true })`,
+      : (/cc-ws\.mjs>?$/.test(recvHint)   // incl. the unconfigured '<cc-ws.mjs>' placeholder
+        ? `  Bash({ command: 'node ${recvHint} ${id} --once', run_in_background: true, description: 'crosstalk bus (${id})' })`
+        : `  Monitor({ command: 'node ${recvHint} ${id}', description: 'crosstalk bus (${id})', persistent: true })`),
     `(The SessionStart join hook prints this exact line. One-off bypass: set CC_LISTEN_BYPASS=1.)`,
   ].join('\n'));
 } catch {

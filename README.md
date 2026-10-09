@@ -63,7 +63,8 @@ claude plugin marketplace add https://github.com/rafik24/crosstalk.git
 claude plugin install crosstalk@crosstalk
 ```
 
-Then create the config `~/.claude/.crosstalk` (shared token). That's it — **hosting needs no native
+Then type `/crosstalk:enrol` in a session and finish in the browser page it opens (see Enrolling
+below) — it writes `~/.claude/.crosstalk`. That's it — **hosting needs no native
 build**: the server stores everything in Node's built-in `node:sqlite`, so a bare `claude plugin
 install` can host the bus on any node (Node 22.13+/24). Full step-by-step: **[`ENROLLMENT.md`](./ENROLLMENT.md)**.
 
@@ -93,9 +94,49 @@ built-in `node:sqlite`, so there's no native build). A plugin install already sh
 
 ## Enrolling a new Claude Code CLI install
 
+**Since 3.3.5 a new box joins by PASSWORD.** Install the plugin, start a session, and the hook
+says: *"Crosstalk isn't set up on this machine — type /crosstalk:enrol"*. Type it. Claude runs one
+command that opens a local page in your browser (`127.0.0.1`, one-time link), and the page picks the
+right form for this machine:
+
+- **Join your estate** — an estate answered on the network: enter its password. "Let this machine
+  host the bus when needed" (default on) plus "Make its bus reachable…" (`CC_BIND=0.0.0.0`, so a
+  failover never lands on a loopback-only leader) — unticked by default, because it listens on every
+  network the machine joins. Terminal: `--auto-supervisor`, `--lan`.
+- **Set up a new estate** — nothing answered: choose a password (≥16 chars, confirmed). "Let my
+  other machines join" — the same explicit `CC_BIND=0.0.0.0` choice, and the page words what it
+  exposes (ENROLLMENT.md §3). If you
+  already use Crosstalk elsewhere, get on the same network or tailnet and reload instead: setting up
+  here creates a separate estate.
+- **Already enrolled** — **Change estate password** (also how a pre-3.3.5 raw-token estate moves to
+  a password) or **Re-enrol** (the password changed on another machine).
+
+The password goes from the browser to this machine only — never through the chat or the
+transcript. The page's server listens on loopback only, needs the one-time token on every request,
+checks Host and Origin, and exits after one enrolment, Cancel, or 5 minutes idle
+([`src/cc-enrol-web.mjs`](./src/cc-enrol-web.mjs)).
+
+**Headless / SSH — the terminal fallback** does the same thing with a hidden prompt:
+
+```sh
+node "<plugin>/src/cc-enrol.mjs" --auto-supervisor     # prompts: Estate password: ▮
+```
+
+Both paths share one core. It derives the two estate secrets from the password (scrypt, fixed
+public salts — every box that knows the password derives the same `CC_TOKEN` / `CC_ADMIN_KEY`; scrypt N=2¹⁷ — **use a passphrase of
+four or more random words, min 16 chars**: it is the only secret), **verifies them against the
+live bus** (a leader must *prove* it holds that token — see Security), and only then writes
+`~/.claude/.crosstalk` (mode 600). A wrong password writes nothing. The password itself is never
+stored. An estate that predates 3.3.5 sets its password once on any enrolled box (page: **Change
+estate password**; terminal: `cc-enrol --set-password`), then re-enrols the others (page: **Re-enrol**;
+terminal: `cc-enrol --re-enrol`) — the estate is split until they all have (`--token <raw>` remains
+for the old way, ≥32 chars). Terminal fallback on Git Bash: run it from Windows Terminal/PowerShell
+or via `winpty` — mintty hides the TTY from node and the hidden prompt refuses.
+
 Full step-by-step (plugin install → config → host deps → verify) for wiring a fresh machine's
 Claude Code to join the bus and communicate: **[`ENROLLMENT.md`](./ENROLLMENT.md)**. The `crosstalk`
-skill ships in the plugin at [`skills/crosstalk/SKILL.md`](./skills/crosstalk/SKILL.md); the
+skill ships in the plugin at [`skills/crosstalk/SKILL.md`](./skills/crosstalk/SKILL.md) and the
+`/crosstalk:enrol` command at [`skills/enrol/SKILL.md`](./skills/enrol/SKILL.md); the
 SessionStart + PreToolUse hooks in [`hooks/hooks.json`](./hooks/hooks.json); the reviewer in
 [`agents/crosstalk-reviewer.md`](./agents/crosstalk-reviewer.md); the manifest in
 [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json).
@@ -119,6 +160,9 @@ hooks, skill, and reviewer agent sit in `.claude-plugin/`, `hooks/`, `skills/`, 
 | `cc-join.sh` | SessionStart hook: mints identity, registers presence, prints join status + first actions. |
 | `cc-listen-gate.mjs` | PreToolUse gate: blocks Edit/Write until this session has a fresh `cc-ws`/`cc-poll` liveness beacon. |
 | `cc-console.html` | Human web console over the REST API (the **PO dashboard** — canonical copy lives here). The leader serves it at `<leader>/console`. |
+| `cc-enrol-web.mjs` + `cc-enrol-web.html` | **`/crosstalk:enrol`** (3.3.5): a one-shot loopback page (one-time token, Host/Origin-checked, exits after one enrolment / Cancel / 5 min idle) for Join · Set up · Change estate password · Re-enrol. Calls `cc-enrol.mjs`'s exported core. |
+| `cc-enrol.mjs` | **Enrol by password** (3.3.5): hidden prompt → scrypt-derived `CC_TOKEN`/`CC_ADMIN_KEY` → verified against a proving leader → `~/.claude/.crosstalk` written. `--set-password` on an enrolled box, `--token` for the raw way. The headless/SSH fallback; exports the core the page uses. |
+| `cc-proof.mjs` | Discovery authentication: whoami nonce/HMAC + signed fresh beacon announces. |
 | `cc-console.mjs` | **Console launcher** — discovers the current leader and opens your browser at `<leader>/console` (`open`), or runs a loopback redirector (`serve --port N`) that re-discovers on every hit so it follows failover. The bus token rides in the URL *hash*, so it's never sent to the server. |
 | `skills/crosstalk/SKILL.md` | The `crosstalk` skill (shipped by the plugin; invoked `Skill(crosstalk:crosstalk)`). |
 | `.claude-plugin/plugin.json` · `hooks/hooks.json` · `agents/crosstalk-reviewer.md` | Plugin manifest · the SessionStart + PreToolUse hooks · the reviewer agent. |
@@ -160,8 +204,19 @@ and **carried with the DB on migration**. `GET /cc/whoami` (unauthenticated — 
 host/epoch/base plus a data **watermark** and the running code **rev**, never a secret) is the
 beacon. Discovery merges every responder and picks the winner by the single `outranks()`
 ordering: **highest epoch**, then — at an equal epoch — the **highest watermark** (the freshest
-snapshot), then the lexicographically-lowest host. A migrated host starts at `epoch+1`, so it
-wins over any stale server; a supervisor that sees a peer outrank it steps down.
+snapshot), then the lexicographically-lowest host, then the lowest **host id**. A migrated host
+starts at `epoch+1`, so it wins over any stale server; a supervisor that sees a peer outrank it
+steps down.
+
+**Host name vs host id (3.3.5, issue 49).** A host's *name* is its canonical slug (lowercase,
+`[a-z0-9-]`) — what logs, the console and DM routing show. Different machines can slug alike
+(`box_1` / `box-1`, every all-non-ASCII hostname → `unknown-host`), so "is that this machine?" —
+the same-host replication guard, "a server is already running here", the supervisor presence id
+(`cc-bus-supervisor/<slug>-h<id>`) and the final tie-break — is decided on a **host id**: 8 hex of
+a SHA-256 of the raw, case-folded hostname (casing alone never splits one box). It is advertised as
+`host_id` in `/cc/whoami` and signed in its proof. A peer without one (pre-3.3.5) is compared by
+slug, as before; a peer that shares our slug but not our id is treated as a different machine and
+logged loudly once — rename one of them. Byte-identical hostnames on two machines still collide.
 
 The **watermark** is the highest message id the leader has served (tracked in memory, so
 `/cc/whoami` never hits the DB). It makes an equal-epoch election pick the branch that took the
@@ -193,14 +248,19 @@ leader **read-only** (writes get a retryable `503 {reason:"draining"}` + `Retry-
 200 for a message about to vanish), and it exits as soon as a replica has pulled a snapshot taken
 after the last write finished — or at `CC_DRAIN_MS` (default 20s) if none shows up; with no
 replica pulling recently it degrades to the plain form at once. A replica that sees
-`x-cc-draining` follows the leader closely and takes the term the moment it is gone (~5s instead
-of a full tick), and the node that stepped down may join but not elect for one tick, so it cannot
+`x-cc-draining` follows the leader closely; the ONE replica whose pull released the leader (its
+export carried `x-cc-released: 1` — only the first final pull gets it) takes the term the moment the
+leader is gone (~5s instead of a full tick), while every other replica holds off ~5–8s (a stable
+per-host spread) and then finds it leading — two replicas no longer promote into the same epoch
+together (issue 52). The node that stepped down may join but not elect for one tick, so it cannot
 snatch the term back (a lone ex-leader therefore takes ~35–40s, not ~15s, to lead again). The plain
 `POST /cc/stepdown` keeps its exact semantics — `migrate` (the target already imported the DB) and
 the outranked-leader monitor never wait.
 
 Who drains: the **version handover** (`cc-bus ensure` finding a supervisor from a superseded
-install) now runs as a detached helper that asks the old leader to *drain*, waits for it to leave,
+install — "superseded" is SemVer precedence, so a final `3.3.4` replaces a running `3.3.4-rc1`,
+never the reverse; before 3.3.5 the prerelease suffix was ignored and an `-rc` leader was never
+handed over, issue 49) now runs as a detached helper that asks the old leader to *drain*, waits for it to leave,
 then replaces its supervisor (which, after a real drain, holds off elections like the ex-leader it
 replaces, so it cannot tie with the replica taking the term); and any operator
 `curl -X POST …/cc/stepdown?drain=1`. It is the OLD server that drains, so this pays off from the
@@ -209,7 +269,11 @@ steps down the old way. On a single-box estate there is no replica to drain for 
 immediate, and loss-free anyway because the new supervisor re-opens the same `messages.db`. Senders ride it out: `cc-send`, `cc-ack`, `cc-work`,
 `cc-codex` and the shared client treat `503 draining` as "wait `Retry-After`, re-discover, re-send"
 (`src/cc-retry.mjs`), so a message issued during a handover lands on the new leader instead of
-failing. Limits, stated: with two or more REMOTE replicas a drain lines their elections up, so both may promote at the same epoch for up to one monitor tick (~5s) before the tie-break demotes one — a write accepted by the loser in that window is lost (issue 52); during a rollout a replica still on 3.3.3 does not follow a drain (it
+failing. Limits, stated: a pre-3.3.5 leader sends no `x-cc-released`, so on the 3.3.4 → 3.3.5
+handover every replica takes the spread (one promotion in the common case; if two still tie, the
+tie-break demotes one within a monitor tick and a write the loser accepted in that window is lost —
+the issue-52 bound, now confined to that one upgrade); simultaneous COLD starts can still elect two
+leaders for a few seconds (issue 48, open); during a rollout a replica still on 3.3.3 does not follow a drain (it
 pulls on its own 30s cadence), so the 20s deadline can fire first and the old loss bound applies
 until that box upgrades too; and any admin `/cc/export` taken during a drain counts as the final
 pull.
@@ -277,6 +341,8 @@ Each machine reads `~/.claude/.crosstalk` (or the legacy `~/.claude/.cross-claud
   this box (default off; see **Self-healing supervisors + coverage**).
 - `CC_REPLICATE_MS` (default 30000, floor 1000) — how often a client pulls the leader's snapshot
   = the unplanned-failover loss bound. Also sets the failover-check tick, clamped to 5–15s.
+- `CC_DISCOVERY_PROOF` — `legacy` accepts responders that cannot prove the estate token (rollout
+  window only; default strict).
 - `CC_DISCOVERY` — `peers` confines discovery to pin + loopback + the explicit `CC_PEERS` list
   (and a cached leader only if it is one of those): no LAN solicit, no tailnet scan, and no beacon. `/cc/whoami` is unauthenticated by design,
   so the default (`auto`) adopts **any** reachable bus with a higher epoch — right for a
@@ -295,6 +361,30 @@ The bus assumes a **trusted network** (a tailnet or a home/office LAN). It speak
 **never bind it to a public interface without TLS and a reverse proxy in front.** The hardening
 below raises the floor; it does not make the bus safe to expose to the open internet.
 
+- **Authenticated discovery (3.3.5).** `/cc/whoami` and the LAN beacon are public, and discovery
+  follows the highest advertised epoch — so before 3.3.5 *any* host answering `{epoch: 1e15}` was
+  adopted as leader and then received every client's bearer token. Now a client sends a fresh
+  nonce and only trusts a responder whose `proof` is `HMAC-SHA256(CC_TOKEN, nonce|host|epoch|watermark|
+  <the server's own socket address:port>[|id=<host_id>])` — the optional field is signed when
+  present because the election orders on it — checked against the address the client actually reached,
+  so a LAN relay that forwards the challenge to the real leader fails at its own address;
+  beacon announces carry `ts` + `HMAC(CC_TOKEN, host|epoch|port|ts)` and are dropped when unsigned
+  or older than 60 s (a stale one is logged once with the measured skew). Nothing derived from the
+  token ever leaves the *client*; the leader does put HMACs keyed by the token on the wire (every
+  beacon, every answered challenge), so a LAN sniffer can guess the secret OFFLINE — use a real
+  passphrase (see Enrolling), never a short raw token. Unproven responders
+  are IGNORED (logged once per base); `CC_DISCOVERY_PROOF=legacy` accepts them with a warning —
+  for the single sitting in which a pre-3.3.5 leader still serves, then removed. **Set it in
+  `~/.claude/.crosstalk`, not just the shell**, so the hook-started auto-supervisor (which reads
+  the config file, not your env) honours it too. A supervisor that saw an unproven responder at an
+  epoch ≥ its own will HOLD OFF promoting (it waits and says why), so a box upgraded before the
+  leader cannot split or steal the estate — but only for ~90 s (`CC_PROMOTE_GUARD_MS`), after which
+  it proceeds loudly, so a forger (or a stray old-token box) cannot freeze failover permanently.
+  **Upgrade the LEADER box to 3.3.5 first**, then the others; a planned rollout with `legacy` set
+  never trips the guard at all. Residual: an active adversary who can *sniff* the LAN and guess a
+  weak password offline; and, on a **tailnet** estate, a stray/old-token responder can stall a
+  failover for that ~90 s window (check `cc-bus.log` for the "NOT promoting" line before assuming a
+  dead bus). `src/cc-proof.mjs`.
 - **Loopback by default.** The server binds `127.0.0.1` unless you set `CC_BIND` (e.g. your
   tailnet IP, or `0.0.0.0`). A node that only serves itself needs nothing; a node that **hosts
   for the estate must set `CC_BIND`** — and, because of the next point, a token with it.
@@ -374,7 +464,7 @@ supplies only its **sink**:
 
 | agent | receiver | sink (`emit`) | wake mechanism |
 |---|---|---|---|
-| Claude Code | `src/cc-ws.mjs` (same CLI/stdout/stderr contract; two behaviour fixes below) | stdout, Monitor-sized blocks | `Monitor(cc-ws)` re-invokes the session per stdout line |
+| Claude Code | `src/cc-ws.mjs --once` (same CLI/stdout/stderr contract; two behaviour fixes below) | stdout; the task exits after a settle window | **background Bash task** (3.3.5): the task's completion re-invokes the session — only when a message for it arrives. Cursors persist across the exit → re-arm gap; exit `3` = superseded by a re-arm. (Plain `Monitor(cc-ws)` still works but Claude Code caps a Monitor at 30 min, so it wakes an idle session every 30 min to be re-armed.) |
 | Codex CLI ≥0.154 | `src/cc-codex-bridge.mjs` — one detached process per session | `codex queue --thread <session_id> --message <line>` | `codex queue` starts a turn immediately on an idle session (FIFO mid-turn) |
 | pi.dev ≥0.85 | `src/pi/crosstalk.ts` — an **in-process** extension, no daemon | `pi.sendMessage(…, {deliverAs:'steer'})` | `steer` delivers the line as a turn after the current one (immediate if idle) |
 

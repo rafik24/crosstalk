@@ -22,8 +22,10 @@ import dgram from 'node:dgram';
 import http from 'node:http';
 import https from 'node:https';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { configPath } from './cc-paths.mjs';
 import { canonicalShort } from './cc-render.mjs';
+import { nonce, whoamiProven, beaconProven, proofMode } from './cc-proof.mjs';
 
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_BEACON_PORT = 8788;
@@ -71,6 +73,33 @@ export function loadConfig() {
   return { token, admin, bind, allowFileOrigin, pin, port, beaconPort, peers, discovery };
 }
 
+// --- host identity (issue 49) ---
+// The canonical slug (canonicalShort) is a NAME — what the logs, the console and DM routing show —
+// and it collides: `box_1`, `box-1` and `BOX 1` all slug to `box-1`, every all-non-ASCII hostname to
+// `unknown-host`. Deciding "is that the same machine?" on it made two boxes one: the #35 same-host
+// guard stopped replication between them, their supervisors shared one presence id, and the
+// election tie-break saw a true tie. Those decisions now key on a HOST ID: a short hash of the raw
+// hostname, case-folded because casing alone must never split one box (issue 39 — the OS and the
+// config spell the same box differently). Stateless on purpose: nothing to persist or lose, and a
+// box keeps its id across reinstalls. Two machines with byte-identical hostnames still collide —
+// that is a misconfigured estate (DNS and the tailnet collide too), not something to paper over.
+export function hostIdOf(raw) {
+  return createHash('sha256').update('host|' + String(raw ?? '').normalize('NFC').trim().toLowerCase()).digest('hex').slice(0, 8);
+}
+// This process's identity, derived exactly as the supervisor derives its own (CC_HOST wins).
+export function localHostIdentity() {
+  const raw = process.env.CC_HOST || hostname();
+  return { host: canonicalShort(raw) || 'unknown-host', hostId: hostIdOf(raw) };
+}
+// Same machine? Slugs must agree; when BOTH sides carry a host id, so must the ids. A peer that
+// advertises none (pre-3.3.5, during the rollout's mixed-version window) falls back to the slug.
+export function sameHost(a, b) {
+  if (!a || !b) return false;
+  const slug = (x) => canonicalShort(String(x.host || '')) || 'unknown-host';
+  if (slug(a) !== slug(b)) return false;
+  return a.hostId && b.hostId ? a.hostId === b.hostId : true;
+}
+
 // --- cache ---
 export function readCache() {
   try { return JSON.parse(readFileSync(cacheFile(), 'utf8')); } catch { return null; }
@@ -113,7 +142,7 @@ function probeJson(url, timeoutMs) {
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (c) => { body += c; if (body.length > 65536) finish(null); });   // a whoami is tiny
-        res.on('end', () => { try { finish(JSON.parse(body)); } catch { finish(null); } });
+        res.on('end', () => { try { const j = JSON.parse(body); if (j && typeof j === 'object') j.__reached = { address: res.socket?.remoteAddress, port: res.socket?.remotePort }; finish(j); } catch { finish(null); } });
         res.on('error', () => finish(null));
       });
       req.on('error', () => finish(null));
@@ -122,21 +151,50 @@ function probeJson(url, timeoutMs) {
   });
 }
 
-// --- one whoami probe ---
-export async function whoami(base, timeoutMs = 1500) {
+// What strict discovery IGNORED lately (base → { epoch, ts }). A supervisor about to promote
+// asks: did anyone answer without proof at an epoch ≥ mine? — during a rollout that is the
+// still-running pre-3.3.5 leader, and promoting beside it would split (or steal) the estate.
+const unprovenSeen = new Map();
+function noteUnproven(base, epoch) { unprovenSeen.set(base, { epoch: Number(epoch) || 0, ts: Date.now() }); }
+export function highestUnprovenEpoch(withinMs = 30000) {
+  let best = null;
+  for (const [b, v] of unprovenSeen) { if (Date.now() - v.ts > withinMs) { unprovenSeen.delete(b); continue; } if (best === null || v.epoch > best.epoch) best = { base: b, epoch: v.epoch }; }
+  return best;
+}
+
+// Unproven responders are reported once per base per process (a chatty warning would drown
+// the logs — a forger answers every scan).
+const warnedUnproven = new Set();
+const warnedBeacon = new Set();
+function warnUnproven(base, j) {
+  if (warnedUnproven.has(base)) return;
+  warnedUnproven.add(base);
+  console.error(`[discovery] ⚠️  ${proofMode() === 'legacy' ? 'ACCEPTING (CC_DISCOVERY_PROOF=legacy)' : 'IGNORING'} unproven leader ${base} (host ${j?.host}, epoch ${j?.epoch}) — it did not prove it holds the estate token`);
+}
+
+// --- one whoami probe --- (token: the estate token to verify the answer with; default = config)
+export async function whoami(base, timeoutMs = 1500, token = undefined) {
   base = base.replace(/\/$/, '');
   try {
-    const j = await probeJson(base + '/cc/whoami', timeoutMs);
+    const tok = token === undefined ? loadConfig().token : token;
+    const n = tok ? nonce() : null;
+    const j = await probeJson(base + '/cc/whoami' + (n ? `?nonce=${n}` : ''), timeoutMs);
     if (!j) return null;
     if (typeof j.epoch !== 'number') return null;
+    // Discovery authentication (issue 55): an enrolled client only trusts a responder that
+    // proves it holds the estate token. Legacy mode (rollout window) accepts with a warning.
+    const proven = whoamiProven(tok, n, j, j.__reached);
+    if (proven === false) { warnUnproven(base, j); noteUnproven(base, j.epoch); if (proofMode() !== 'legacy') return null; }
     // Canonical base = the address WE dialed (guaranteed reachable from here), not what the
     // server guesses. host/epoch/rev/watermark come from the server. watermark is the highest
     // message id served — a freshness proxy the election uses to break an equal-epoch tie.
     return {
       base, host: j.host, epoch: j.epoch, role: j.role || 'leader',
+      hostId: typeof j.host_id === 'string' && j.host_id ? j.host_id : null,   // collision-safe host identity (issue 49); null from a pre-3.3.5 peer
       rev: j.rev || null, dirty: !!j.dirty,
       watermark: typeof j.watermark === 'number' ? j.watermark : 0,
       draining: !!j.draining,   // the leader is in a drain stepdown (read-only, about to leave)
+      proven: proven === true,  // false for an unproven responder accepted in legacy mode / by an unenrolled caller
     };
   } catch { return null; }
 }
@@ -150,7 +208,9 @@ export async function whoami(base, timeoutMs = 1500) {
 //                                        stale returning leader can't clobber fresher history.
 //                                        "most-writes-win" — a defensible, deterministic policy
 //                                        strictly better than the old arbitrary hostname tie.
-//   3. then lexicographically LOWEST host — final deterministic tiebreak (equal epoch+watermark).
+//   3. then lexicographically LOWEST host — final deterministic tiebreak (equal epoch+watermark);
+//                                        two boxes whose names slug alike are ordered by host id
+//                                        (issue 49) — else they were a true tie that nothing broke.
 // Returns true when `a` should beat `b`.
 export function outranks(a, b) {
   if (!b) return !!a;
@@ -162,7 +222,8 @@ export function outranks(a, b) {
   // filter instance ids get) and compare code points. localeCompare on raw hostnames made the
   // winner of an exact tie depend on casing and platform locale.
   const ah = canonicalShort(String(a.host || '')), bh = canonicalShort(String(b.host || ''));
-  return ah < bh;
+  if (ah !== bh) return ah < bh;
+  return !!(a.hostId && b.hostId) && a.hostId < b.hostId;   // one side without an id (pre-3.3.5): a tie, as before
 }
 
 // pick the authoritative leader among responders per the outranks() ordering.
@@ -174,7 +235,7 @@ function pickAuthoritative(responders) {
 }
 
 // --- LAN UDP solicit: broadcast "who's the leader?", collect unicast announces ---
-function lanSolicit(beaconPort, timeoutMs = 400) {
+function lanSolicit(beaconPort, timeoutMs = 400, token = '') {
   return new Promise((resolve) => {
     const found = [];
     let sock;
@@ -200,6 +261,14 @@ function lanSolicit(beaconPort, timeoutMs = 400) {
       try {
         const m = JSON.parse(buf.toString());
         if (m && m.t === 'announce' && typeof m.epoch === 'number') {
+          // Issue 55: an announce must carry a fresh, valid proof (or the caller runs legacy).
+          const proven = beaconProven(token, m);
+          if (proven === false) {
+            // Say WHY, once per source: a clock >60s off silently killed LAN discovery otherwise.
+            const key = rinfo.address + ':' + m.port;
+            if (!warnedBeacon.has(key)) { warnedBeacon.add(key); const skew = typeof m.ts === 'number' ? Math.round(Math.abs(Date.now() - m.ts) / 1000) : null; console.error(`[discovery] ⚠️  ${proofMode() === 'legacy' ? 'ACCEPTING' : 'IGNORING'} beacon from ${rinfo.address} (host ${m.host}, epoch ${m.epoch}): ${typeof m.proof !== 'string' ? 'unsigned (pre-3.3.5 leader?)' : skew !== null && skew > 60 ? `stale by ${skew}s — check the clocks on both boxes` : 'bad proof (different estate token)'}`); }
+            if (proofMode() !== 'legacy') return;
+          }
           found.push({ ip: rinfo.address, port: m.port || DEFAULT_PORT, host: m.host, epoch: m.epoch });
         }
       } catch {}
@@ -269,7 +338,7 @@ export async function resolveFast(opts = {}) {
   // stale/demoted loopback or a warm cache entry must never win over a live higher-epoch
   // leader (that bug let a superseded loopback "zombie" leader keep co-located clients
   // bound to it forever). pickAuthoritative applies the epoch>tiebreak ordering.
-  const responders = await Promise.all(tryBases.map((b) => whoami(b, opts.timeoutMs || 1200)));
+  const responders = await Promise.all(tryBases.map((b) => whoami(b, opts.timeoutMs || 1200, opts.token ?? cfg.token)));
   const best = pickAuthoritative(responders);
   if (best) { cacheLeader(best); return best; }
   // Fast path missed → escalate to a full scan (also follows a migration).
@@ -281,7 +350,6 @@ export async function resolveFull(opts = {}) {
   const cfg = loadConfig();
   const pin = opts.pin ?? cfg.pin;
   const port = cfg.port;
-  const selfHost = (process.env.CC_HOST || hostname());
 
   const bases = new Set();
   if (pin) bases.add(pin.replace(/\/$/, ''));
@@ -294,16 +362,18 @@ export async function resolveFull(opts = {}) {
 
   // LAN + tailnet in parallel — unless discovery is confined to the explicit peer list.
   const [lan, ts] = cfg.discovery === 'peers' ? [[], []] : await Promise.all([
-    lanSolicit(cfg.beaconPort, opts.lanTimeoutMs || 400),
+    lanSolicit(cfg.beaconPort, opts.lanTimeoutMs || 400, opts.token ?? cfg.token),
     tailscalePeers(),
   ]);
   for (const r of lan) bases.add(`http://${r.ip}:${r.port}`);
   for (const ip of ts) bases.add(`http://${ip}:${port}`);
 
-  const responders = await Promise.all([...bases].map((b) => whoami(b, opts.timeoutMs || 1500)));
+  const responders = await Promise.all([...bases].map((b) => whoami(b, opts.timeoutMs || 1500, opts.token ?? cfg.token)));
   let best = pickAuthoritative(responders);
   // Optionally ignore a leader that is THIS node (election needs "is anyone ELSE leading?").
-  if (best && opts.skipSelf && best.host === selfHost && isLoopbackOrSelf(best.base)) {
+  // (sameHost, not a raw-hostname ===: a leader advertises its canonical slug, so an uppercase OS
+  // hostname never matched itself here and a supervisor could "discover" its own server.)
+  if (best && opts.skipSelf && sameHost(best, localHostIdentity()) && isLoopbackOrSelf(best.base)) {
     const others = pickAuthoritative(responders.filter((r) => r && r.base !== best.base));
     best = others;
   }

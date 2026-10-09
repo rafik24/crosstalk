@@ -23,6 +23,8 @@ Object.assign(process.env, { HOME: SCRATCH, USERPROFILE: SCRATCH, CC_BUS_CONFIG:
 for (const k of ['CC_TOKEN', 'CC_BASE', 'CC_PIN']) delete process.env[k];
 
 const { createReceiver } = await import('../src/cc-receive.mjs');
+const { whoamiProof } = await import('../src/cc-proof.mjs');
+const TOKEN = 't';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = false;
 const ok = (cond, msg) => { if (!cond) { failed = true; console.error('  ✗', msg); } else { console.log('  ✓', msg); } };
@@ -34,7 +36,11 @@ let store = Array.from({ length: 600 }, (_, k) => mk(k + 1, '2026-01-01 00:00:00
 const srv = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const json = (o) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(o)); };
-  if (u.pathname === '/cc/whoami') return json({ role: 'leader', host: 'stub', epoch, watermark: store.length ? store[store.length - 1].id : 0 });
+  if (u.pathname === '/cc/whoami') {   // answers the 3.3.5 discovery challenge — strict clients ignore an unproven leader
+    const n = u.searchParams.get('nonce');
+    const wm = store.length ? store[store.length - 1].id : 0;
+    return json({ role: 'leader', host: 'stub', epoch, watermark: wm, ...(n ? { proof: whoamiProof(TOKEN, n, 'stub', epoch, wm, req.socket.localAddress, req.socket.localPort) } : {}) });
+  }
   if (u.pathname === '/api/register') return json({ ok: true });
   if (u.pathname === '/api/channels') return json({ channels: [{ name: 'general' }] });
   if (u.pathname === '/api/messages/general') {
@@ -47,7 +53,7 @@ const srv = http.createServer((req, res) => {
 await new Promise((r) => srv.listen(PORT, '127.0.0.1', r));
 
 const delivered = [], logs = [];
-const rx = createReceiver({ instance: 'box/rx', token: 't', pin: `http://127.0.0.1:${PORT}`, firehose: true, emit: (_r, m) => { delivered.push(m); }, log: (l) => logs.push(l), onVersionGate: () => {} });
+const rx = createReceiver({ instance: 'box/rx', token: TOKEN, pin: `http://127.0.0.1:${PORT}`, firehose: true, emit: (_r, m) => { delivered.push(m); }, log: (l) => logs.push(l), onVersionGate: () => {} });
 try {
   await rx.start();
   ok(rx.cursors.general === 600 && delivered.length === 0, `seeded at the tip (cursor ${rx.cursors.general}) without replaying the backlog`);

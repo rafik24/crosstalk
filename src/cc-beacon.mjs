@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import dgram from 'node:dgram';
 import { networkInterfaces } from 'node:os';
+import { beaconProof } from './cc-proof.mjs';
 
 function directedBroadcasts() {
   const out = new Set(['255.255.255.255']);
@@ -29,9 +30,11 @@ function directedBroadcasts() {
   return [...out];
 }
 
-export function startBeacon({ host, epoch, port = 8787, beaconPort = 8788, announceMs = 5000 } = {}) {
+export function startBeacon({ host, epoch, port = 8787, beaconPort = 8788, announceMs = 5000, token = '' } = {}) {
   const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-  const announce = () => Buffer.from(JSON.stringify({ t: 'announce', v: 1, host, epoch, port }));
+  // Every announce is signed with the estate token + a timestamp (issue 55): a solicitor only
+  // trusts an announce it can verify, and a captured one cannot be replayed past BEACON_FRESH_MS.
+  const announce = () => { const ts = Date.now(); return Buffer.from(JSON.stringify({ t: 'announce', v: 2, host, epoch, port, ts, ...(token ? { proof: beaconProof(token, host, epoch, port, ts) } : {}) })); };
 
   sock.on('error', (e) => { console.error('[beacon] socket error:', e.message); try { sock.close(); } catch {} });
   sock.on('message', (buf, rinfo) => {

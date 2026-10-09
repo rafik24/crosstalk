@@ -14,7 +14,7 @@
 //   1. writes ~/.claude/.cc-listen/<session_id>.id  (the map the listen-gate READS —
 //      so the gate agrees with your new name automatically, no recompute),
 //   2. registers the new id on the bus (upsert),
-//   3. prints the exact Monitor(...) line to (re)arm live-receive under the new id.
+//   3. prints the exact background-Bash line to (re)arm live-receive under the new id.
 //
 // IMPORTANT: arm cc-poll with the id printed here. If you had already armed a
 // Monitor under the old id, STOP it first — the beacon must be written under the
@@ -75,10 +75,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ws = join(HERE, 'cc-ws.mjs');
 const send = join(HERE, 'cc-send.mjs');
 console.log(`named on the bus as: ${id}`);
-console.log(`ARM (or RE-ARM) live-receive with THIS id — stop any prior Monitor first:`);
+console.log(`ARM (or RE-ARM) live-receive with THIS id — TaskStop any receiver armed under an older id first:`);
 // cc-ws is the real-time PUSH receiver (WebSocket + cursor backfill, issue #3). It auto-falls
 // back to the old 2s poll if the leader is too old to speak WS, so it is always safe to arm.
-console.log(`  Monitor({ command: 'node ${ws} ${id}', description: 'crosstalk bus (${id})', persistent: true })`);
-console.log(`  (routine re-arm wakes are SILENT: when the 30-min beacon re-invokes you with no addressed`);
-console.log(`   message, just re-run this Monitor line and emit nothing — no "re-armed", no ※ recap.)`);
+console.log(`  Bash({ command: 'node ${ws} ${id} --once', run_in_background: true, description: 'crosstalk bus (${id})' })`);
+console.log(`  (it EXITS when a message for you arrives: re-arm FIRST with this same line, then Read the task's`);
+console.log(`   output file. Exit 3 = superseded → do nothing. Routine wakes are SILENT — no "re-armed", no ※ recap.)`);
 console.log(`From now, send as:  node ${send} ${id} <channel|all> 'message'`);

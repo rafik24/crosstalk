@@ -18,6 +18,7 @@
 //   L3r the dead ex-leader restarts → rejoins as CLIENT, the promoted leader keeps the term
 //   L2b SAME-HOST second supervisor sharing the leader's data dir (issue 35): never replicates —
 //       no replica file, leader DB inode stable, history intact
+//   L2c two DIFFERENT boxes whose hostnames slug alike (issue 49): they DO replicate (host id)
 //
 // Judged by /cc/whoami + pid liveness, never supervisor.json alone (it lags and survives a kill).
 // Slow by nature: a client's failover check AND its replication pull both ride one fixed 15s tick
@@ -152,8 +153,19 @@ try {
   ok(hist.some((m) => m.id === s1.id), 'leader history intact with the same-host client attached');
   { const left = await g.destroy(); ok(left.length === 0, `teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`); }
 
+  // --- L2c -------------------------------------------------------------------------------------
+  // Issue 49: two DIFFERENT boxes whose hostnames canonicalise alike (box_1 / box-1 → "box-1").
+  // Deciding "same host" on the slug made the client skip replication from that leader for ever —
+  // its failover would then promote on an empty DB. The host id tells them apart.
+  console.log('L2c two DIFFERENT boxes whose hostnames slug alike (issue 49)');
+  const h = mkFleet('slugtwins', { hostOverrides: { 0: 'box_1', 1: 'box-1' } });
+  await h.up();
+  ok(await h.waitFor(() => !!fileId(h.replicaPath(1)), 3 * CLIENT_TICK_MS, 100), 'the client REPLICATES from a leader that merely shares its slug (it used to skip it as "this host")');
+  ok(/different host id/.test(h.log(1)), 'and warns loudly that the two hostnames collide');
+  { const left = await h.destroy(); ok(left.length === 0, `teardown left nothing behind${left.length ? ' — ' + left.join('; ') : ''}`); }
+
   if (failed) console.error('❌ fleet.test FAILED');
-  else console.log(`✅ fleet.test: all assertions passed (F0 import guard, F1 boot, L2a/L2b replication safety, L3 failover in ${promoteMs} ms, L3r rejoin)`);
+  else console.log(`✅ fleet.test: all assertions passed (F0 import guard, F1 boot, L2a/L2b replication safety, L3 failover in ${promoteMs} ms, L3r rejoin, L2c slug twins)`);
 } catch (e) {
   failed = true;
   console.error('❌ fleet.test ERROR:', e.stack || e.message);
